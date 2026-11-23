@@ -424,6 +424,131 @@ test_stats_failchk(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/* ---- victim choice in a three-locker cycle ----
+ *
+ * L1 holds a and waits for b, L2 holds b and waits for c, L3 holds c and
+ * waits for a.  Five lockers are allocated first, so the cycle's locker
+ * IDs (6, 7, 8) differ from the detector's node indices (0, 1, 2).  The
+ * test wants L2 as the victim: the CUSTOM picker finds it by locker ID,
+ * and under EXPIRE it is the one locker whose deadline has passed.  The
+ * victim's wait returns XTC_E_DEADLK and the others are granted in turn.
+ * Before 2.3.0 (and 2.1.6) the picker was handed node indices. */
+static xtc_lockmgr_t *g_vc_m;
+static xtc_locker_t   g_vc_l[3];
+static int            g_vc_rc[3];
+static uint64_t       g_vc_seen[8];
+static int            g_vc_nseen;
+static int            g_vc_calls;
+
+static void *
+vc_waiter(void *arg)
+{
+	static const char *want[3] = { "b", "c", "a" };
+	int i = *(int *)arg;
+	xtc_atomic_store_i32(&g_vc_rc[i],
+	    xtc_lock_get(g_vc_m, g_vc_l[i], want[i], 1, XTC_LOCK_X, -1),
+	    xtc_mo_seq_cst);
+	return NULL;
+}
+
+/* Record the candidates and pick L2 by its locker ID. */
+static int
+vc_pick(const uint64_t *cand, int n, void *user)
+{
+	int i, pick = -1;
+	(void)user;
+	g_vc_calls++;
+	g_vc_nseen = n;
+	for (i = 0; i < n && i < 8; i++) {
+		g_vc_seen[i] = cand[i];
+		if (cand[i] == g_vc_l[1])
+			pick = i;
+	}
+	return pick;
+}
+
+static MunitResult
+test_victim_cycle(const MunitParameter p[], void *d)
+{
+	static const char *hold[3] = { "a", "b", "c" };
+	static int idx[3] = { 0, 1, 2 };
+	const char *policy = munit_parameters_get(p, "policy");
+	xtc_lockmgr_opts_t o = XTC_LOCKMGR_OPTS_INIT;
+	xtc_lockmgr_stat_t s;
+	xtc_locker_t junk;
+	pthread_t th[3];
+	int i, j, found, n_aborted = 0;
+	(void)d;
+
+	o.detect_mode = XTC_LOCK_DETECT_NONE;
+	if (strcmp(policy, "custom") == 0) {
+		o.victim = XTC_LOCK_VICTIM_CUSTOM;
+		o.victim_pick_fn = vc_pick;
+	} else {
+		o.victim = XTC_LOCK_VICTIM_EXPIRE;
+	}
+	munit_assert_int(xtc_lockmgr_create(&o, &g_vc_m), ==, XTC_OK);
+	for (i = 0; i < 5; i++)
+		munit_assert_int(xtc_lockmgr_id(g_vc_m, &junk), ==, XTC_OK);
+	for (i = 0; i < 3; i++) {
+		munit_assert_int(xtc_lockmgr_id(g_vc_m, &g_vc_l[i]), ==, XTC_OK);
+		munit_assert_int(xtc_lock_get(g_vc_m, g_vc_l[i], hold[i], 1,
+		    XTC_LOCK_X, 0), ==, XTC_OK);
+		xtc_atomic_store_i32(&g_vc_rc[i], 1, xtc_mo_seq_cst);
+	}
+	munit_assert_uint64(g_vc_l[0], ==, 6);
+	if (strcmp(policy, "expire") == 0)
+		munit_assert_int(xtc_lockmgr_id_set_timeout(g_vc_m, g_vc_l[1],
+		    0), ==, XTC_OK);
+	g_vc_calls = 0;
+	g_vc_nseen = 0;
+
+	for (i = 0; i < 3; i++)
+		pthread_create(&th[i], NULL, vc_waiter, &idx[i]);
+	do {
+		struct timespec ts = { 0, 1000 * 1000 };
+		nanosleep(&ts, NULL);
+		munit_assert_int(xtc_lockmgr_stat(g_vc_m, &s), ==, XTC_OK);
+	} while (s.n_waiting < 3);
+
+	munit_assert_int(xtc_lockmgr_check_deadlocks(g_vc_m, &n_aborted), ==,
+	    XTC_OK);
+	munit_assert_int(n_aborted, ==, 1);
+	/* The picker ran inside the check; test what it saw before joining,
+	 * since a wrong victim leaves the other two waiters deadlocked. */
+	if (strcmp(policy, "custom") == 0) {
+		munit_assert_int(g_vc_calls, ==, 1);
+		munit_assert_int(g_vc_nseen, ==, 3);
+		for (i = 0; i < 3; i++) {
+			found = 0;
+			for (j = 0; j < 3; j++)
+				found += g_vc_seen[j] == g_vc_l[i];
+			munit_assert_int(found, ==, 1);
+		}
+	}
+	pthread_join(th[1], NULL);
+	munit_assert_int(xtc_atomic_load_i32(&g_vc_rc[1], xtc_mo_seq_cst), ==,
+	    XTC_E_DEADLK);
+
+	/* L1 now holds a and b; releasing it lets L3 take a. */
+	pthread_join(th[0], NULL);
+	munit_assert_int(xtc_atomic_load_i32(&g_vc_rc[0], xtc_mo_seq_cst), ==,
+	    XTC_OK);
+	munit_assert_int(xtc_lock_release_all(g_vc_m, g_vc_l[0]), ==, 2);
+	pthread_join(th[2], NULL);
+	munit_assert_int(xtc_atomic_load_i32(&g_vc_rc[2], xtc_mo_seq_cst), ==,
+	    XTC_OK);
+
+	xtc_lockmgr_destroy(g_vc_m);
+	return MUNIT_OK;
+}
+
+static char *vc_policies[] = { (char *)"custom", (char *)"expire", NULL };
+static MunitParameterEnum vc_params[] = {
+	{ (char *)"policy", vc_policies },
+	{ NULL, NULL }
+};
+
 static xtc_lockmgr_t *g_onblk_mgr;
 static _Atomic int    g_onblk_t1_rc;
 static _Atomic int    g_onblk_t2_rc;
@@ -757,6 +882,7 @@ static MunitTest tests[] = {
 	{ "/lock_vec_rollback",  test_lock_vec_rollback,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/stats_failchk",      test_stats_failchk,      NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/detect_on_block",    test_detect_on_block,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/victim_cycle",       test_victim_cycle,       NULL, NULL, MUNIT_TEST_OPTION_NONE, vc_params },
 	{ "/reget_checks_other_holders", test_reget_checks_other_holders, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/reget_never_weakens",        test_reget_never_weakens,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/downgrade_by_matrix",        test_downgrade_by_matrix,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
