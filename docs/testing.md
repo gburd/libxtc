@@ -140,8 +140,9 @@ which gates the workflow. The commitment to PBT is recorded in
 Every CI push runs the full `make check` under
 **AddressSanitizer** (`detect_leaks=1:abort_on_error=1`) and
 **UndefinedBehaviorSanitizer** (`print_stacktrace=1:halt_on_error=1`),
-with gcc and with clang, and a separate job runs the DST tier under
-both. ASan catches use-after-free, buffer overflow, and leaks; UBSan
+with gcc and with clang, and a separate job runs the core of the DST
+tier (eleven tests: scheduler, replay, the determinism guard, faults)
+under both.  ASan catches use-after-free, buffer overflow, and leaks; UBSan
 catches signed overflow, misaligned access, and the other C undefined
 behaviors that compile quietly and fail on a different target. A latent
 UBSan misalignment once rotted this project's CI for weeks, which is why

@@ -341,7 +341,7 @@ The repository lives on Codeberg (`origin`,
 GitHub (`gburd/libxtc`), where the Actions CI runs (.github/workflows/
 ci.yml, on pushes to `main` and `lts/2.1` and on pull requests): gcc
 and clang `make check`, AddressSanitizer and UndefinedBehaviorSanitizer
-over `make check` and over DST, ThreadSanitizer, Valgrind, musl
+over `make check` and over a core DST subset, ThreadSanitizer, Valgrind, musl
 (x86-64 and aarch64), the DST tier with bug injection and the seed
 corpus, the hegel property tier, the five TLS backends, the examples,
 macOS, FreeBSD, riscv64, and an MSVC build that runs a smoke test and a
