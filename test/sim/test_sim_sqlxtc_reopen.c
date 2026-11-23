@@ -69,6 +69,7 @@
 #define _GNU_SOURCE
 #endif
 #include <fcntl.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -148,6 +149,7 @@ struct shared {
 	uint64_t    evicted, loads;   /* buffer pool, summed over segments */
 	uint64_t    ckpts, ckpt_again, ckpt_frames, crash_after_ckpt;
 	uint64_t    snaps, snaps_spanning, gc_runs, gc_reclaimed, prunes;
+	uint64_t    ikeys;            /* hash of every open's index SipHash keys */
 	int         failed;
 };
 
@@ -963,6 +965,23 @@ drop_gap(void)
 	return g_sh->failed ? -1 : 0;
 }
 
+/* Fold the SipHash keys of t's indexes into the fingerprint.  A key is
+ * drawn at CREATE INDEX, before any run, and shapes the truncated keys
+ * in the tree: a key that is not a function of the seed (one that took
+ * the process's address layout) differs here in every fresh process,
+ * even when no row happens to be truncated. */
+static void
+ikeys_note(void)
+{
+	xstore_index_info_t ix[8];
+	int n = xstore_index_list(sx_storage_bt(), "t", ix, 8), i;
+
+	for (i = 0; i < n; i++) {
+		g_sh->ikeys = (g_sh->ikeys ^ ix[i].k0) * 0x100000001B3ull;
+		g_sh->ikeys = (g_sh->ikeys ^ ix[i].k1) * 0x100000001B3ull;
+	}
+}
+
 /* Open the store, recording which kind of open this is. */
 static int
 open_store(const char **kind)
@@ -1001,6 +1020,7 @@ open_store(const char **kind)
 		}
 		g_sh->created = 1;
 	}
+	ikeys_note();
 	return 0;
 }
 
@@ -1096,6 +1116,7 @@ run_seed(uint64_t seed, uint64_t *fp)
 	h = (h ^ g_sh->crashes) * 0x100000001B3ull;
 	h = (h ^ g_sh->ckpts) * 0x100000001B3ull;
 	h = (h ^ g_sh->ckpt_frames) * 0x100000001B3ull;
+	h = (h ^ g_sh->ikeys) * 0x100000001B3ull;
 	*fp = h;
 	return ok ? 0 : 1;
 }
@@ -1157,6 +1178,64 @@ tr_diverge(uint64_t seed, const struct trace *a, const struct trace *b)
 		    (unsigned long long)b->r[i].a, (unsigned long long)b->r[i].b);
 }
 
+/*
+ * The fresh-process replay check.  Both runs of a seed in run_seed() fork
+ * from this one process, so an input fixed per process (its ASLR layout,
+ * an address-seeded RNG, state left by an earlier seed) is the same in
+ * both and the in-process REPLAY check cannot see it.  So the sweep's
+ * first seed also runs, alone, in a freshly exec'd copy of this program
+ * ("fp" mode prints its fingerprint), which must match.  Returns 0 if it
+ * matches, else 1 with a FAIL line.
+ */
+static int
+fresh_replay(const char *self, uint64_t seed, uint64_t want)
+{
+	char sarg[32], line[256];
+	int pfd[2], st;
+	uint64_t got = 0;
+	int seen = 0;
+	FILE *f;
+	pid_t p;
+
+	snprintf(sarg, sizeof sarg, "%llu", (unsigned long long)seed);
+	fflush(stdout);
+	fflush(stderr);
+	if (pipe(pfd) != 0)
+		return 1;
+	p = fork();
+	if (p == 0) {
+		(void)dup2(pfd[1], 1);
+		close(pfd[0]);
+		close(pfd[1]);
+		execl(self, self, sarg, "1", "fp", (char *)NULL);
+		_exit(127);
+	}
+	close(pfd[1]);
+	if (p < 0 || (f = fdopen(pfd[0], "r")) == NULL) {
+		close(pfd[0]);
+		printf("FAIL: seed=%s FRESH REPLAY: cannot start %s\n", sarg, self);
+		return 1;
+	}
+	while (fgets(line, sizeof line, f) != NULL)
+		if (sscanf(line, "fp %*s %" SCNx64, &got) == 1)
+			seen = 1;
+	fclose(f);
+	if (waitpid(p, &st, 0) != p || !WIFEXITED(st) || WEXITSTATUS(st) != 0 ||
+	    !seen) {
+		printf("FAIL: seed=%s FRESH REPLAY: the fresh process failed "
+		    "(status 0x%x)\n", sarg, st);
+		return 1;
+	}
+	if (got != want) {
+		printf("FAIL: seed=%s FRESH REPLAY: fingerprint %016llx here, "
+		    "%016llx in a fresh process (an input fixed per process, "
+		    "such as its address layout, reached the run)\n", sarg,
+		    (unsigned long long)want, (unsigned long long)got);
+		return 1;
+	}
+	return 0;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1167,6 +1246,9 @@ main(int argc, char **argv)
 	 * a run -- a stamp offset sampled from the wall clock -- makes the
 	 * replay differ every time, not one run in twenty. */
 	int sleep_ms = argc > 3 && strcmp(argv[3], "sleep") == 0 ? 50 : 0;
+	/* argv[3] "fp": run each seed once and print its fingerprint (the
+	 * child side of fresh_replay). */
+	int fp_mode = argc > 3 && strcmp(argv[3], "fp") == 0;
 	uint64_t acked = 0, crashes = 0, cleans = 0, tr = 0, rec = 0, it = 0;
 	uint64_t ev = 0, ld = 0, ck = 0, cka = 0, ckf = 0, cac = 0;
 	uint64_t sn = 0, sns = 0, gcr = 0, gcv = 0, pr = 0;
@@ -1190,6 +1272,11 @@ main(int argc, char **argv)
 			printf("corpus row: %s %llu 1 <fixing commit>: <what failed>\n",
 			    SIM_TEST, (unsigned long long)seed);
 			return 1;
+		}
+		if (fp_mode) {
+			printf("fp %llu %016llx\n", (unsigned long long)seed,
+			    (unsigned long long)f1);
+			continue;
 		}
 		acked += g_sh->acked;
 		crashes += g_sh->crashes;
@@ -1220,7 +1307,14 @@ main(int argc, char **argv)
 			tr_diverge(seed, g_tr1, g_tr);
 			return 1;
 		}
+		if (k == 0 && fresh_replay(argv[0], seed, f1) != 0) {
+			printf("corpus row: %s %llu 1 <fixing commit>: <what failed>\n",
+			    SIM_TEST, (unsigned long long)seed);
+			return 1;
+		}
 	}
+	if (fp_mode)
+		return 0;
 	printf("sweep: %d seeds x2 (replayed): %llu acked ops, %llu crashes, "
 	    "%llu clean closes, %llu trusted reopens (%llu kept the indexes), "
 	    "%llu recoveries; pool %d frames: %llu evictions, %llu page loads\n",

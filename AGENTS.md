@@ -241,6 +241,15 @@ in priority order:
    un-seeded __os_rand_u64 / xtc_rand_u64 draw under the simulator
    takes the run's XTC_SIM_RNG_RAND stream (src/os/os_rand.c), so it
    replays; the guard test asserts it does not trip and does replay.
+   A draw with the virtual clock on but OUTSIDE a run (a harness's
+   setup between xtc_sim_clock_enable and xtc_sim_exec_run) is not a
+   run draw: the thread auto-seeds, from the virtual time XOR a
+   constant, never its TLS address (since 2.3; before, the address
+   carried the ASLR layout into the draws, so a DST harness's CREATE
+   INDEX key, and the tree it shaped, differed between processes).
+   The guard test asserts two concurrent threads draw the same value
+   there.  Off the virtual clock the address stays in the seed, so
+   real threads still get distinct streams.
 
    CONSUMER-VISIBLE COROLLARY: xtc_clock_mono is virtualized by the
    simulator and is the clock to use on any sim-reachable path;
