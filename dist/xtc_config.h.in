@@ -156,14 +156,14 @@
 /* wolfSSL TLS backend */
 #undef XTC_TLS_BACKEND_WOLFSSL
 
-/* SemVer major */
+/* ABI level, major */
 #undef XTC_VERSION_MAJOR
 
-/* SemVer minor */
+/* ABI level, minor */
 #undef XTC_VERSION_MINOR
 
-/* SemVer patch */
+/* ABI level, patch */
 #undef XTC_VERSION_PATCH
 
-/* Library version as SemVer string */
+/* Release name: the ABI level or a CalVer date */
 #undef XTC_VERSION_STRING

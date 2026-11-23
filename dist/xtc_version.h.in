@@ -16,11 +16,14 @@
 #ifndef XTC_VERSION_H
 #define XTC_VERSION_H
 
-/* The library version, from dist/version.in. */
+/* The ABI level, from dist/version.in: MAJOR is the SONAME's major and
+ * a 2.x minor names the newest symbol node (XTC_2.3).  The release name,
+ * which a development release from main gives as a date (2026.11.24)
+ * and an LTS release as its ABI level (2.1.6). */
 #define XTC_VERSION_MAJOR @XTC_VERSION_MAJOR@
 #define XTC_VERSION_MINOR @XTC_VERSION_MINOR@
 #define XTC_VERSION_PATCH @XTC_VERSION_PATCH@
-#define XTC_VERSION_STRING "@XTC_VERSION_FULL@"
+#define XTC_VERSION_STRING "@XTC_RELEASE_NAME@"
 
 /* The TLS backend, one of XTC_TLS_BACKEND_OPENSSL, _MBEDTLS, _GNUTLS,
  * _WOLFSSL, _SCHANNEL or _NONE.  xtc_tls.h defines XTC_TLS_ENABLED for

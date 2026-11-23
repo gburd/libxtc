@@ -16,9 +16,10 @@
 #       library .c form xtc.c.  Exactly one coroutine substrate
 #       (ucontext) is included -- the portable drop-in default.
 #
-#       Version block: parsed from dist/version.in plus git (exact tag,
-#       nearest tag, short and long commit hash, and an optional
-#       qualifier such as -rc1).
+#       Version block: the ABI level from dist/version.in, the release
+#       name from dist/release_name.sh (XTC_VERSION_STRING), plus git
+#       (exact tag, nearest tag, short and long commit hash, and an
+#       optional qualifier such as -rc1).
 #
 #       Debug #line remapping: by default the amalgamation reports its
 #       own file/line.  When built with -DDEBUG and
@@ -132,12 +133,18 @@ def version_defines(root, qualifier):
     else:
         major, minor, patch, extra = m.groups()
     qual = qualifier if qualifier else extra.lstrip("-")
+    # A development release names itself in dist/release.in; only then
+    # is sh needed, so an LTS tree still amalgamates without one.
+    name = "%s.%s.%s" % (major, minor, patch)
+    if os.path.exists(os.path.join(root, "dist", "release.in")):
+        name = subprocess.check_output(
+            ["sh", os.path.join(root, "dist", "release_name.sh"),
+             os.path.join(root, "dist")]).decode().strip()
     short = git(root, "rev-parse", "--short", "HEAD")
     longh = git(root, "rev-parse", "HEAD")
     exact = git(root, "describe", "--tags", "--exact-match")
     nearest = git(root, "describe", "--tags", "--abbrev=0")
-    full = "%s.%s.%s%s" % (major, minor, patch,
-                           ("-" + qual) if qual else "")
+    full = "%s%s" % (name, ("-" + qual) if qual else "")
     L = []
     L.append("/* --- amalgamation version identity (generated) --- */\n")
     L.append("#define XTC_VERSION_MAJOR %s\n" % major)

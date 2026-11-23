@@ -15,11 +15,10 @@
 #include "xtc.h"
 
 /*
- * The library version is the single point of truth for the
- * three SemVer integer components and the full string.  The
- * macros come from xtc_config.h (autoconf) or meson_config.h
- * (meson) -- both produced by the build system from
- * dist/version.in.
+ * The three integer components are the ABI level (dist/version.in)
+ * and the string is the release name (dist/release_name.sh: the ABI
+ * level, or a CalVer date for a development release).  The macros
+ * come from xtc_config.h, which configure or meson generates.
  *
  * PUBLIC: const char *xtc_version_string __P((void));
  */

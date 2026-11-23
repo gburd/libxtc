@@ -19,8 +19,11 @@
       let
         pkgs = import nixpkgs { inherit system; };
 
-        version =
-          pkgs.lib.removeSuffix "\n" (builtins.readFile ./dist/version.in);
+        # The release name (dist/release_name.sh): a development release's
+        # CalVer name from dist/release.in, else the ABI level.
+        version = pkgs.lib.removeSuffix "\n" (builtins.readFile
+          (if builtins.pathExists ./dist/release.in
+           then ./dist/release.in else ./dist/version.in));
 
         # ------------------------------------------------------------------
         #  libhegel -- property-based testing engine (C ABI)

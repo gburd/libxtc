@@ -696,6 +696,7 @@ CPPFLAGS
 LDFLAGS
 CFLAGS
 CC
+XTC_RELEASE_NAME
 XTC_VERSION_PATCH
 XTC_VERSION_MINOR
 XTC_VERSION_MAJOR
@@ -2619,12 +2620,18 @@ esac
 printf "%s\n" "$abs_builddir" >&6; }
 
 # -------------------------------------------------------------------------
-# Version components.  Parsed from dist/version.in (single source of truth).
+# Version components.  Two versions (dist/release_name.sh says why):
+# the ABI level MAJOR.MINOR.PATCH from dist/version.in, which names the
+# SONAME, the real-file name and the XTC_VERSION_MAJOR/_MINOR/_PATCH
+# macros, and the release name (dist/release.in, defaulting to the ABI
+# level), which is XTC_VERSION_STRING and pkg-config's Version.
 # -------------------------------------------------------------------------
 xtc_version_full=`cat "$srcdir/version.in"`
 xtc_version_major=`echo "$xtc_version_full" | sed -e 's/^\([0-9]*\).*/\1/'`
 xtc_version_minor=`echo "$xtc_version_full" | sed -e 's/^[0-9]*\.\([0-9]*\).*/\1/'`
 xtc_version_patch=`echo "$xtc_version_full" | sed -e 's/^[0-9]*\.[0-9]*\.\([0-9]*\).*/\1/'`
+xtc_release_name=`sh "$srcdir/release_name.sh" "$srcdir"` ||
+	as_fn_error $? "dist/release.in is not a valid release name" "$LINENO" 5
 XTC_VERSION_FULL=$xtc_version_full
 
 XTC_VERSION_MAJOR=$xtc_version_major
@@ -2633,9 +2640,11 @@ XTC_VERSION_MINOR=$xtc_version_minor
 
 XTC_VERSION_PATCH=$xtc_version_patch
 
+XTC_RELEASE_NAME=$xtc_release_name
 
 
-printf "%s\n" "#define XTC_VERSION_STRING \"$xtc_version_full\"" >>confdefs.h
+
+printf "%s\n" "#define XTC_VERSION_STRING \"$xtc_release_name\"" >>confdefs.h
 
 
 printf "%s\n" "#define XTC_VERSION_MAJOR $xtc_version_major" >>confdefs.h

@@ -1,6 +1,6 @@
 .\" Copyright (c) 2026, The XTC Project
 .\" Use of this source code is governed by the ISC License.
-.Dd May 25, 2026
+.Dd November 23, 2026
 .Dt XTC_VERSION_COMPONENTS 3
 .Os
 .Sh NAME
@@ -13,12 +13,12 @@
 .Sh DESCRIPTION
 The
 .Fn xtc_version_components
-function writes the SemVer
+function writes the
 .Em major ,
 .Em minor ,
 and
 .Em patch
-components of the library version into the integers pointed to by
+components of the library's ABI level into the integers pointed to by
 .Fa major ,
 .Fa minor ,
 and
@@ -26,9 +26,20 @@ and
 respectively.
 .Pp
 Every output component is a non-negative integer.
-The components agree with the leading numeric portion of the string
-returned by
-.Xr xtc_version_string 3 .
+The ABI level is the one the shared library's SONAME
+.Pq libxtc.so. Ns Em major
+and its newest symbol-version node
+.Pq XTC_ Ns Em major . Ns Em minor
+name, and equals the
+.Dv XTC_VERSION_MAJOR ,
+.Dv XTC_VERSION_MINOR
+and
+.Dv XTC_VERSION_PATCH
+macros.
+For an LTS release the components agree with the leading numeric portion
+of the string returned by
+.Xr xtc_version_string 3 ;
+a development release's string is a date instead.
 .Sh RETURN VALUES
 On success the function returns
 .Dv XTC_OK

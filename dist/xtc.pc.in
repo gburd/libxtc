@@ -15,7 +15,7 @@ includedir=@includedir@
 Name: @XTC_INSTALL_NAME@
 Description: High-performance async/concurrency runtime for C (@XTC_IO_BACKEND@ backend)
 URL: https://codeberg.org/gregburd/libxtc
-Version: @XTC_VERSION_FULL@
+Version: @XTC_RELEASE_NAME@
 Cflags: -I${includedir}
 Libs: -L${libdir} -l@XTC_INSTALL_NAME@
 Libs.private: @XTC_PC_LIBS_PRIVATE@

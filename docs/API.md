@@ -26,15 +26,21 @@ const char *xtc_version_string(void);
 int         xtc_version_components(int *major, int *minor, int *patch);
 ```
 
-`xtc_version_string` returns a NUL-terminated SemVer 2.0 string
-(e.g. `"0.0.1-m0"`).  The pointer is to static storage.
+`xtc_version_string` returns the release name, a NUL-terminated
+string in static storage.  An LTS release is named by its ABI level in
+SemVer (`"2.1.6"`); a development release from `main` is named by its
+date in CalVer (`"2026.11.24"`, or `"2026.11.24.2"` for a second
+release that day).
 
-`xtc_version_components` writes the three numeric components into
-the caller's integers and returns `XTC_OK`.  Any `NULL` argument
-returns `XTC_E_INVAL` without modifying outputs.
+`xtc_version_components` writes the ABI level's three numeric
+components into the caller's integers and returns `XTC_OK`.  Any
+`NULL` argument returns `XTC_E_INVAL` without modifying outputs.  The
+ABI level gives the SONAME (`libxtc.so.2`) and the newest symbol node
+(`XTC_2.3`).
 
-The string and the components always agree on the leading
-`MAJOR.MINOR.PATCH` triple.
+For an LTS release the string and the components agree on the
+leading `MAJOR.MINOR.PATCH` triple; a development release's string is
+a date, and only the components give its ABI level.
 
 See `xtc_version_string(3)`, `xtc_version_components(3)`.
 
@@ -83,14 +89,15 @@ See `xtc_strerror(3)`.
 
 <!-- fragment -->
 ```c
-XTC_VERSION_STRING   /* e.g. "2.3.0" */
-XTC_VERSION_MAJOR    /* 2 */
+XTC_VERSION_STRING   /* the release name, e.g. "2026.11.24" or "2.1.6" */
+XTC_VERSION_MAJOR    /* the ABI level, e.g. 2 */
 XTC_VERSION_MINOR    /* 3 */
 XTC_VERSION_PATCH    /* 0 */
 ```
 
 These come from the installed `xtc_version.h`, which `xtc.h` includes
-and the build generates from `dist/version.in`.  It also names the
+and the build generates from `dist/version.in` (the ABI level) and
+`dist/release_name.sh` (the release name).  It also names the
 build's TLS backend (`XTC_TLS_BACKEND_*`), its I/O backend
 (`XTC_IO_BACKEND_*`) and `XTC_HAVE_UCONTEXT`.
 

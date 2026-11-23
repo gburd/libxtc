@@ -58,7 +58,8 @@
  *     NEW function name (or a MAJOR).
  *   - A MAJOR release starts over with a single XTC_<MAJOR>.0 node and a
  *     new SONAME (libxtc.so.MAJOR); test/m0/test_symbols.sh [C9] checks
- *     that the base node matches the MAJOR in dist/version.in.
+ *     that the base node matches the MAJOR in dist/version.in (the ABI
+ *     level; a development release's CalVer name never reaches here).
  * The Mach-O (libxtc.exp) and Windows builds have no symbol versions;
  * they get the same export SET (see [C8]).
  */

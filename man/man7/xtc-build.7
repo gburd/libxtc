@@ -1,6 +1,6 @@
 .\" Copyright (c) 2026, The XTC Project
 .\" Use of this source code is governed by the ISC License.
-.Dd May 25, 2026
+.Dd November 23, 2026
 .Dt XTC-BUILD 7
 .Os
 .Sh NAME
@@ -78,7 +78,24 @@ Meson build entry point.
 .It Pa dist/Makefile.in
 Template for the autoconf-generated Makefile.
 .It Pa dist/version.in
-Single source of truth for the SemVer version.
+The ABI level,
+.Em MAJOR.MINOR.PATCH :
+the SONAME's major, the shared library's file name and the
+.Dv XTC_VERSION_MAJOR ,
+.Dv _MINOR
+and
+.Dv _PATCH
+macros.
+.It Pa dist/release.in
+Present only on a development release: its CalVer name,
+.Em YYYY.MM.DD
+.Pq or Em YYYY.MM.DD.N .
+.Pa dist/release_name.sh
+prints the release name
+.Pq this file, or the ABI level when it is absent ,
+which is
+.Dv XTC_VERSION_STRING ,
+pkg-config's Version and the tag.
 .El
 .Sh SEE ALSO
 .Xr xtc 7 ,

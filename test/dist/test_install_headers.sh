@@ -123,7 +123,7 @@ fi
 # and an XTC_IO_BACKEND_* name.
 test -f "$prefix/include/xtc_version.h" || {
 	echo "  [install-headers] FAIL: xtc_version.h not installed"; exit 1; }
-want_ver=$(cat "$XTC_SRC_DIR/dist/version.in")
+want_ver=$(sh "$XTC_SRC_DIR/dist/release_name.sh" "$XTC_SRC_DIR/dist")
 want_tls=1
 grep -q '^XTC_TLS_BACKEND[[:space:]]*=[[:space:]]*none' "$build/Makefile" &&
     want_tls=0

@@ -35,25 +35,32 @@ esac
 AC_MSG_RESULT([$abs_builddir])
 
 # -------------------------------------------------------------------------
-# Version components.  Parsed from dist/version.in (single source of truth).
+# Version components.  Two versions (dist/release_name.sh says why):
+# the ABI level MAJOR.MINOR.PATCH from dist/version.in, which names the
+# SONAME, the real-file name and the XTC_VERSION_MAJOR/_MINOR/_PATCH
+# macros, and the release name (dist/release.in, defaulting to the ABI
+# level), which is XTC_VERSION_STRING and pkg-config's Version.
 # -------------------------------------------------------------------------
 xtc_version_full=`cat "$srcdir/version.in"`
 xtc_version_major=`echo "$xtc_version_full" | sed -e 's/^\([[0-9]]*\).*/\1/'`
 xtc_version_minor=`echo "$xtc_version_full" | sed -e 's/^[[0-9]]*\.\([[0-9]]*\).*/\1/'`
 xtc_version_patch=`echo "$xtc_version_full" | sed -e 's/^[[0-9]]*\.[[0-9]]*\.\([[0-9]]*\).*/\1/'`
+xtc_release_name=`sh "$srcdir/release_name.sh" "$srcdir"` ||
+	AC_MSG_ERROR([dist/release.in is not a valid release name])
 AC_SUBST([XTC_VERSION_FULL],  [$xtc_version_full])
 AC_SUBST([XTC_VERSION_MAJOR], [$xtc_version_major])
 AC_SUBST([XTC_VERSION_MINOR], [$xtc_version_minor])
 AC_SUBST([XTC_VERSION_PATCH], [$xtc_version_patch])
+AC_SUBST([XTC_RELEASE_NAME],  [$xtc_release_name])
 
 AC_DEFINE_UNQUOTED([XTC_VERSION_STRING],
-	["$xtc_version_full"], [Library version as SemVer string])
+	["$xtc_release_name"], [Release name: the ABI level or a CalVer date])
 AC_DEFINE_UNQUOTED([XTC_VERSION_MAJOR],
-	[$xtc_version_major], [SemVer major])
+	[$xtc_version_major], [ABI level, major])
 AC_DEFINE_UNQUOTED([XTC_VERSION_MINOR],
-	[$xtc_version_minor], [SemVer minor])
+	[$xtc_version_minor], [ABI level, minor])
 AC_DEFINE_UNQUOTED([XTC_VERSION_PATCH],
-	[$xtc_version_patch], [SemVer patch])
+	[$xtc_version_patch], [ABI level, patch])
 
 # -------------------------------------------------------------------------
 # Toolchain.

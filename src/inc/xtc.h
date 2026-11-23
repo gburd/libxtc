@@ -33,7 +33,9 @@ extern "C" {
 
 /*
  * Compile-time version macros, and what the build selected: its TLS and
- * I/O backends and ucontext.  An installed libxtc carries them in
+ * I/O backends and ucontext.  XTC_VERSION_MAJOR/_MINOR/_PATCH are the ABI
+ * level and XTC_VERSION_STRING the release name (see xtc_version_string
+ * below).  An installed libxtc carries them in
  * xtc_version.h, which configure (or meson) generates from
  * dist/xtc_version.h.in; the library's own build also has its private
  * xtc_config.h, which defines the same names with the same values.  A
@@ -136,14 +138,17 @@ XTC_API int xtc_err_from_errno(int neg_or_pos_errno);
 
 /*
  * xtc_version_string --
- *	Return the library version as a NUL-terminated SemVer 2.0 string.
+ *	Return the release name as a NUL-terminated string: the ABI level as
+ *	SemVer for an LTS release ("2.1.6"), or the date of a development
+ *	release from main as CalVer YYYY.MM.DD[.N] ("2026.11.24").
  *	The pointer is to static storage; the caller must not free it.
  */
 XTC_API const char *xtc_version_string(void);
 
 /*
  * xtc_version_components --
- *	Decompose the version into three integers.
+ *	Return the ABI level as three integers (2.3.0 for a development
+ *	release whose symbols reach XTC_2.3).  MAJOR is the SONAME's major.
  *	On success returns XTC_OK and writes *major, *minor, *patch.
  *	On NULL out-pointers returns XTC_E_INVAL.
  */

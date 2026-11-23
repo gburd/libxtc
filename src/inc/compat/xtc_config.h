@@ -22,9 +22,11 @@
 /* Version.  This compat header is hand-maintained (the MSVC build does
  * not run configure, which is what fills dist/xtc_config.h from
  * version.in on the autoconf path).  Keep these FOUR macros mutually
- * consistent -- STRING must be exactly "MAJOR.MINOR.PATCH" -- and in
- * step with dist/version.in, or test/m0/test_version's consistency
- * check (strncmp(string, "maj.min.patch")) fails under MSVC. */
+ * consistent and in step with dist/version.in: MAJOR/MINOR/PATCH are
+ * the ABI level, and STRING is the release name, which is exactly
+ * "MAJOR.MINOR.PATCH" unless dist/release.in names a development
+ * release, when it is that name (dist/release_name.sh).  Otherwise
+ * test/m0/test_version's checks fail under MSVC. */
 #define XTC_VERSION_MAJOR  2
 #define XTC_VERSION_MINOR  3
 #define XTC_VERSION_PATCH 0

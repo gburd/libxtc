@@ -1,11 +1,11 @@
 .\" Copyright (c) 2026, The XTC Project
 .\" Use of this source code is governed by the ISC License.
-.Dd May 25, 2026
+.Dd November 23, 2026
 .Dt XTC_VERSION_STRING 3
 .Os
 .Sh NAME
 .Nm xtc_version_string
-.Nd return the xtc library version as a SemVer string
+.Nd return the xtc release name
 .Sh SYNOPSIS
 .In xtc.h
 .Ft const char *
@@ -13,24 +13,45 @@
 .Sh DESCRIPTION
 The
 .Fn xtc_version_string
-function returns the xtc library version as a NUL-terminated string in
-.Em SemVer 2.0
-format
-.Pq Dq major.minor.patch optionally followed by Dq -prerelease .
+function returns the name of the xtc release as a NUL-terminated string.
 The returned pointer is to static storage and must not be freed.
 .Pp
-The string always begins with the same numeric components reported by
-.Xr xtc_version_components 3 .
-This invariant is asserted by the M0 test suite
-.Pq checked by Pa test/m0/test_version.c No [C3] .
+libxtc has two kinds of release.
+A long-term-support release, from the
+.Li lts/2.1
+branch, is named by its ABI level in
+.Em SemVer 2.0
+format
+.Pq Dq major.minor.patch , for example Dq 2.1.6 ,
+and the string begins with the same numeric components that
+.Xr xtc_version_components 3
+reports.
+A development release, from
+.Li main ,
+is named by its date in CalVer format
+.Pq Dq YYYY.MM.DD , or Dq YYYY.MM.DD.N No for a second release on one day ,
+for example
+.Dq 2026.11.24 .
+Its ABI level is not in the string; ask
+.Xr xtc_version_components 3 ,
+which says, for example, 2.3.0.
+A tree that is neither, built from a checkout, is named by its ABI
+level.
+Both forms are checked by
+.Pa test/m0/test_version.c .
 .Pp
 The same version is available at compile time as the
-.Dv XTC_VERSION_STRING ,
+.Dv XTC_VERSION_STRING
+macro
+.Pq the release name
+and the
 .Dv XTC_VERSION_MAJOR ,
 .Dv XTC_VERSION_MINOR
 and
 .Dv XTC_VERSION_PATCH
-macros of
+macros
+.Pq the ABI level
+of
 .In xtc_version.h ,
 which
 .In xtc.h
@@ -70,7 +91,8 @@ int main(void) {
 .Xr xtc_version_components 3 ,
 .Xr xtc_strerror 3
 .Sh STANDARDS
-The version string conforms to
-.Lk https://semver.org SemVer 2.0 .
+An LTS release name conforms to
+.Lk https://semver.org SemVer 2.0 ;
+a development release name is a CalVer date.
 .Sh HISTORY
 First appeared in xtc 0.0.1.

@@ -36,9 +36,17 @@ host_sys = host_machine.system()
 # -----------------------------------------------------------------------------
 cdata = configuration_data()
 
+# Two versions (dist/release_name.sh says why): the project version is
+# the ABI level from dist/version.in, which gives the SONAME, the
+# real-file name and the MAJOR/MINOR/PATCH macros; the release name
+# (dist/release.in, defaulting to the ABI level) is XTC_VERSION_STRING
+# and pkg-config's Version.
 ver = meson.project_version()
 ver_parts = ver.split('-')[0].split('.')
-cdata.set_quoted('XTC_VERSION_STRING', ver)
+release_name = run_command('sh',
+  meson.project_source_root() / 'dist' / 'release_name.sh',
+  meson.project_source_root() / 'dist', check : true).stdout().strip()
+cdata.set_quoted('XTC_VERSION_STRING', release_name)
 cdata.set('XTC_VERSION_MAJOR', ver_parts[0].to_int())
 cdata.set('XTC_VERSION_MINOR', ver_parts[1].to_int())
 cdata.set('XTC_VERSION_PATCH', ver_parts[2].to_int())
@@ -344,7 +352,7 @@ vdata = configuration_data()
 vdata.set('XTC_VERSION_MAJOR', ver_parts[0].to_int())
 vdata.set('XTC_VERSION_MINOR', ver_parts[1].to_int())
 vdata.set('XTC_VERSION_PATCH', ver_parts[2].to_int())
-vdata.set('XTC_VERSION_FULL', ver)
+vdata.set('XTC_RELEASE_NAME', release_name)
 vdata.set('XTC_TLS_BACKEND_MACRO', tls_macro[tls_backend])
 vdata.set('XTC_IO_BACKEND_MACRO', io_macro[io_backend])
 vdata.set('XTC_UCONTEXT_DEFINE', cdata.has('XTC_HAVE_UCONTEXT')
@@ -647,7 +655,7 @@ pkg.generate(
   name : lib_name,
   description : 'High-performance async/concurrency runtime for C (' + io_backend + ' backend)',
   url : 'https://codeberg.org/gregburd/libxtc',
-  version : meson.project_version(),
+  version : release_name,
   libraries : xtc_lib,
   subdirs : '.',
 )
