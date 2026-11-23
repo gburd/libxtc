@@ -51,7 +51,8 @@ trap 'rm -rf "$tmpd" 2>/dev/null || :' EXIT
 
 # The page checks need no library, so they run first and always.
 pages=$( (find "$SRC/docs" -name '*.md' ! -path "$SRC/docs/_site/*" \
-    ! -path "$SRC/docs/vendor/*" ! -path "$SRC/docs/api/*"; \
+    ! -path "$SRC/docs/vendor/*" ! -path "$SRC/docs/api/*" \
+    ! -path "$SRC/docs/_includes/*"; \
     echo "$SRC/README.md") | sort)
 pagefail=0
 for p in $pages; do
