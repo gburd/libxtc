@@ -42,22 +42,29 @@ out and [TigerBeetle](https://tigerbeetle.com/) made a headline feature;
 stackless runtime. libxtc treats it as the primary defense, not an
 extra:
 
-- **52+ simulation tests** (`test/sim/`) run every commit in CI over the
+- **92 simulation tests** (`test/sim/`) run on every CI push over the
   sim I/O backend, plus a nightly 100,000-seed swarm across the combined
   fault set. Run the full DST suite locally with `make check-dst` (a
   separate `--with-io-backend=sim` build; not part of plain `make check`
   since it configures and builds a second copy of the library).
+- **Every failing seed is pinned.** `test/sim/corpus/seeds.txt` lists
+  each seed a sweep has ever failed on, with the fixing commit, and
+  `scripts/dst-corpus.sh` replays the whole corpus on every CI push.
 - **The right metric is bug-detection latency, not coverage.** A
-  bug-injection harness (`scripts/dst-bug-inject.sh`) plants a known
-  safety bug -- a dropped wakeup, a skipped fsync, a lock-conflict error
-  -- and asserts the simulator *catches* it from a seed. A planted bug
-  the sweep misses is a hole in DST coverage and fails the build. This is
+  bug-injection harness (`scripts/dst-bug-inject.sh`) plants each of
+  the known safety bugs listed in `src/inc/xtc_dst_inject.h` -- a
+  dropped wakeup, a skipped fsync, a conflicting lock grant, and about
+  fifty more -- and asserts that the simulator *catches* each one, for
+  the reason it was planted, within a seed budget (64 by default). A
+  planted bug the sweep misses is a hole in DST coverage and fails the
+  build. This is
   exactly how FoundationDB and TigerBeetle back the claim "our simulator
   finds real bugs."
 - **Determinism is mechanically enforced.** A guard traps any use of the
-  real clock, real RNG, environment, or thread id from sim-reachable
+  real clock, the environment, or the raw thread id from sim-reachable
   code, so a test cannot silently become non-deterministic; every sim
-  run proves its own determinism.
+  run proves its own determinism. The RNG is not trapped but
+  virtualized: an un-seeded draw takes the run's own seeded stream.
 
 ### Simulating your own application
 
@@ -105,36 +112,36 @@ failure to a minimal reproducer.
 
 libxtc uses [**Hegel**](https://hegel.dev), a property-based-testing
 library based on [Hypothesis](https://github.com/hypothesisworks/hypothesis),
-as a first-class testing tool. The PBT suite links against the official
-C binding, [`hegel-c`](https://github.com/gburd/hegel-c), driven by
-the `hegel` protocol server. The `test/pbt/` suite states properties
+as a first-class testing tool. The PBT suite links
+[`libhegel`](https://github.com/hegeldev/hegel-rust), Hegel's in-process
+C-ABI library: generation and shrinking run inside the test binary, with
+no server. The `test/pbt/` suite states 39 properties in 18 suites
 across the layers:
 
-- deque and run-queue: never lose or duplicate an item under random
-  push/steal sequences;
-- channels: MPSC send order preserved, no message loss;
-- mailbox: BEAM selective-receive ordering under arbitrary skip patterns;
-- lock manager: any random acquire/release/promote sequence honors the
-  conflict matrix;
-- deadlock detector: every cycle in a random waits-for graph is detected,
-  with no false positives;
-- lrlock / lwlock / atomics / timers / slab / allocator: their core
-  invariants under generated load.
+- deque and run queue: a pop/steal race partitions the items, and every
+  task runs exactly its target number of times;
+- channels: oneshot round trip, MPSC send order preserved;
+- processes: every spawn completes, send/recv round trip, FIFO order;
+- chash / cskip: equivalence with a model under random operations;
+- lrlock / lwlock / atomics / timers / slab / allocator / scope / saga /
+  scheduler shares / the simulator's PRNG and clock: their core
+  invariants under generated input.
 
-PBT is a build-time option (`--with-hegel=PATH`, pointing at a built
-[`hegel-c`](https://github.com/gburd/hegel-c) tree; it links
-`libhegel` plus its `libcbor` and `zlib` dependencies and runs against
-the `hegel` server). The same test files compile
-to no-ops without it, so the suite is always present and turns on where
-Hegel is available. The commitment to PBT is recorded in
+PBT is a build-time option (`--with-hegel`, found through pkg-config,
+or `--with-hegel=PREFIX`; `nix develop` provides libhegel). The same
+test files compile without it and each suite prints a loud SKIP naming
+how many properties went unverified, so a green run without the option
+says nothing about them. CI runs the tier with libhegel in its own job,
+which gates the workflow. The commitment to PBT is recorded in
 [ADR 0002](https://codeberg.org/gregburd/libxtc/src/branch/main/docs/adr/0002-hegel-pbt-first-class.md).
 
 ## Sanitizers
 
-Every commit runs the full C test suite under
+Every CI push runs the full `make check` under
 **AddressSanitizer** (`detect_leaks=1:abort_on_error=1`) and
-**UndefinedBehaviorSanitizer** (`print_stacktrace=1:halt_on_error=1`) in
-CI. ASan catches use-after-free, buffer overflow, and leaks; UBSan
+**UndefinedBehaviorSanitizer** (`print_stacktrace=1:halt_on_error=1`),
+with gcc and with clang, and a separate job runs the DST tier under
+both. ASan catches use-after-free, buffer overflow, and leaks; UBSan
 catches signed overflow, misaligned access, and the other C undefined
 behaviors that compile quietly and fail on a different target. A latent
 UBSan misalignment once rotted this project's CI for weeks, which is why
@@ -152,8 +159,10 @@ full `clang -fsanitize=thread` build of libxtc runs the fiber suite
 zero TSan warnings.  This is **clang-only**: the fiber-identity API is a
 clang compiler-rt feature; gcc's `libtsan` does not implement it, so a
 gcc TSan build emits no fiber annotations (and the ASan stack-switch
-API, a distinct model, is used only under AddressSanitizer).  Valgrind
-memcheck is a documented gap on the roadmap, not a claim we make today.
+API, a distinct model, is used only under AddressSanitizer).  A
+Valgrind job runs memcheck, Helgrind, and DRD over a chosen subset of
+the C tests and memcheck over the DST tier; the full munit suite is too
+slow under Valgrind to run whole.
 
 ## Claim-driven, test-first
 
@@ -170,9 +179,11 @@ and every public function must have a man page or the build fails.
 
 A concurrency runtime that only works on the developer's laptop is not
 trustworthy. The suite is **runtime-verified** (not merely compiled) on
-Linux (epoll + io_uring) and macOS (kqueue) every commit in CI, and
-re-verified out-of-CI on FreeBSD (clang, kqueue), illumos (big-endian
-sparcv9, event ports), and Windows (IOCP). Building on big-endian SPARC
+every CI push on Linux (io_uring, epoll, gcc and clang, glibc and musl,
+x86-64 and AArch64), macOS (kqueue), FreeBSD (clang, kqueue, in a VM),
+and riscv64 (under qemu-user); Windows CI builds the library with MSVC
+and runs a smoke test.  It is re-verified by hand, outside CI, on
+illumos (big-endian sparcv9, event ports) and the Windows IOCP runtime. Building on big-endian SPARC
 in particular validates byte-order assumptions in the codecs, hashing,
 and atomics that a little-endian-only test would never exercise. The
 honest per-platform status -- what runs versus what only compiles -- is
