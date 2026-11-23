@@ -696,8 +696,10 @@ flowchart TD
   fsync-loss -- from a seed. Crash safety is tested at three levels: the
   simulator (seeded crashes, torn writes, lost fsyncs), the server under
   repeated kill -9 with every acknowledged commit checked after restart
-  (`test_crash_oracle` also kills multi-row autocommit statements and
-  checks that each one is all there or not there),
+  (`test_crash_oracle` also kills multi-row autocommit statements, at a
+  random time and at planned points before and after each kind's commit
+  record is durable, and checks that each one is all there or not
+  there),
   and injected log-write failures (a file-size limit makes every write
   past it fail) where every acknowledged commit must survive and every
   failed one must have returned an error. See

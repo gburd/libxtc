@@ -69,7 +69,10 @@ libxtc (2.3.0-1) unstable; urgency=medium
       A DDL statement waiting on the schema lock at shutdown fails with
       "cannot change the schema: the storage engine is shutting down".
       New tests test_stmt_atomic and test_insert_race; test_crash_oracle
-      kills multi-row statements; planted bug 87.
+      kills multi-row statements, at random and at planned points on
+      each side of the commit record; planted bug 87.  A statement
+      discarded by a kill fails with "statement cancelled: the
+      connection was killed".
   * Tests: test_sync's off-loop spin, notify-spin and no-herd tests count
     the lock's own condvar sleeps and wakeups instead of OS context
     switches; test_exec's Ex5 and test_sup's group-restart hook tests
