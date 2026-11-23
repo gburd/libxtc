@@ -151,17 +151,29 @@ both were allocated at accept; 20,000 idle connections, `--loops=2`).
   crash in the middle of it brings back the keyspace before the command
   or after it, never a part.  A TTL out of range is refused as Redis
   refuses it, changing nothing: SET with an EX or PX of zero or less,
-  or too far out to hold (about 220 years), answers `-ERR invalid
-  expire time in 'set' command`, EXPIRE too far out answers the same
-  for `'expire'`, and EXPIRE with zero or less deletes the key.  At
-  startup a torn last record (what a crash leaves) is cut off, with a
-  line on stderr; a record that fails its checksum with valid records
-  after it is damage, and the server refuses to start, naming the
-  offset, rather than drop every write after it.  A directory from an
-  older rexis (`bitcask.data`) is adopted as `bitcask.v2`; the empty
-  `bitcask.data` an older binary leaves when pointed at a new
-  directory is removed with a warning, and one that holds records next
-  to `bitcask.v2` makes the server refuse to start.  The
+  or with an expiry after April 2262 (the last instant signed 64-bit
+  nanoseconds can hold), answers `-ERR invalid expire time in 'set'
+  command`; EXPIRE past April 2262, or below INT64_MIN / 1000, answers
+  the same for `'expire'`; and any other EXPIRE of zero or less
+  deletes the key.
+
+  Every record's header carries its own checksum over its lengths, so
+  a damaged length is never taken for a torn write.  The rule at
+  startup: a crash or kill -9 leaves a torn tail, which is cut off,
+  with a line on stderr; any other damage refuses the start, naming
+  the offset, rather than drop every write after it.  Damage to the
+  last record, with nothing valid after it, cannot be told from a torn
+  write and is cut like one.  A power loss is not a crash: the log is
+  not fsync'd, so a power loss can leave a hole before the last record,
+  which refuses the start and needs an operator.
+
+  A directory from an older rexis (`bitcask.data`) is converted to
+  `bitcask.v2` at the first start, in steps that a crash at any point
+  resumes.  An older binary cannot read a converted directory: it
+  starts empty and leaves `bitcask.v2` alone, though it creates an
+  empty `bitcask.data`.  The next start removes that file with a
+  warning, and refuses to start if it holds records next to
+  `bitcask.v2`.  The
   [README](https://codeberg.org/gregburd/libxtc-examples/src/branch/main/05_rexis/README.md)
   has the details (the merge, the record format, and the test that
   kills the server in the middle of a write).
