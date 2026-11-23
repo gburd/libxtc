@@ -143,7 +143,7 @@ typedef int (*xtc_match_fn)(const void *data, size_t size, void *user_data);
 /*
  * Process entry function.  The proc runs as a coroutine and the
  * function returns nothing; exit happens by returning from the entry,
- * by calling xtc_exit, or by being killed via a link.
+ * by calling xtc_exit_self, or by being killed via a link.
  */
 typedef void (*xtc_proc_fn)(void *arg);
 
