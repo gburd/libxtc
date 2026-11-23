@@ -61,9 +61,10 @@ typedef enum xtc_err {
 const char *xtc_strerror(int xtc_err);
 ```
 
-Below these lies the system-error band (2.2): a call that fails with
-an operating-system error the codes above do not name returns
-`XTC_E_SYS(errno)`, and `xtc_err_errno(rc)` recovers the errno.
+Below these lies the system-error band (2.2): xtc_aio and xtc_iosched
+return `XTC_E_SYS(errno)` for an operating-system error the codes above
+do not name, and `xtc_err_errno(rc)` recovers the errno; the rest of
+the library folds such errors to `XTC_E_IO`.
 
 `xtc_strerror` returns a stable English description.  A code in the
 system-error band reads "system error: " and the C library's text;
@@ -141,8 +142,7 @@ See `xtc_atomic(3)`.
   which writes a per-thread buffer that stays valid until the thread's
   next `xtc_strerror` call.
 - **No `errno` reliance.**  A caller never reads `errno` to learn why
-  a call failed: the return code says, and an operating-system error
-  with no `XTC_E_*` name comes back as `XTC_E_SYS(errno)`.
+  a call failed: the return code says.
 - **No globals visible to users.**  Even the version macros are
   expanded at compile time into the consumer's translation unit;
   there is no `xtc_version` variable.
