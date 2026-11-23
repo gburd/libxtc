@@ -60,7 +60,7 @@ apples-to-apples.
   others?), `bench_disk` / `bench_uring_disk` / `bench_net` (I/O paths).
   The fiber context switch measures about **4.4 ns** on x86-64 (the
   bare `__xtc_jump_fcontext` round trip divided by two, minimum of 11
-  runs, on a two-socket Ice Lake host with libxtc 2.1.1-37) -- a
+  runs, on a two-socket x86-64 host with libxtc 2.1.1-37) -- a
   micro-number that is honest precisely because it measures one narrow
   thing and says so.  That is the hand-written fcontext substrate, the
   default on Linux x86-64 and aarch64 (glibc), Apple Silicon and musl.  Elsewhere,
@@ -101,6 +101,11 @@ cd bench/conformance
 BENCH_WORKERS=1 ./run.sh        # single-core (per-core efficiency)
 BENCH_WORKERS=$(nproc) ./run.sh # full parallelism
 ```
+
+`run.sh` runs each `w<N>_<name>/<runtime>/bench` it finds and silently
+skips the ones that are not built, so build the drivers you want to
+compare first (each runtime directory has its own build; see the
+suite's README).
 
 The harness and its output format are in
 [`bench/conformance/`](https://codeberg.org/gregburd/libxtc/src/branch/main/bench/conformance);
