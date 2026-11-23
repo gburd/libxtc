@@ -63,10 +63,6 @@ uint64_t x = xtc_rand_u64();   /* reproducible from seed 42 */
 It is **not** a cryptographic generator -- do not use it for keys or
 security tokens.
 
-> A future release may hook this into the deterministic-simulation clock
-> (DST) so a replayed run draws a reproducible sequence; today it is simply
-> a clean, thread-safe, seedable source.
-
 ## 3. `strncpy` does not NUL-terminate
 
 `strncpy(3)` omits the terminator when the source is at least as long as
@@ -91,4 +87,4 @@ so it is guaranteed to build against the current API:
 
 {% include snippet.html file="05_sharp_edges.c" region="full" %}
 
-See [`xtc_env(3)`](../../man/) for the full contract of each function.
+See [`xtc_env(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_env.3) for the full contract of each function.

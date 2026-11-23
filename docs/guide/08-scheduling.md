@@ -348,9 +348,9 @@ backend fallback that needs no device and runs in `make check`:
 
 ## See also
 
-- [`xtc_exec(3)`]({{ '/man/xtc_exec/' | relative_url }}) -- the class and
+- [`xtc_exec(3)`]({{ '/reference/api/xtc_exec/' | relative_url }}) -- the class and
   stall-watchdog API in full.
-- [`xtc_proc(3)`]({{ '/man/xtc_proc/' | relative_url }}) --
+- [`xtc_proc(3)`]({{ '/reference/api/xtc_proc/' | relative_url }}) --
   `xtc_proc_set_class` and `xtc_proc_opts_t.sched_class`.
 - [`xtc_sched(3)`]({{ '/reference/api/xtc_sched/' | relative_url }}) --
   lane policies, the bypass bound, and the continuous policy.

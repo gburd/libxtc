@@ -24,7 +24,7 @@ microscope for Tokio, and it **produces traces the dial9 GUI viewer opens
 unchanged**. You get a battle-tested visual timeline for free; libxtc's job is
 to emit the events in dial9's wire format.
 
-Compared to [`xtc_stats`]({{ '/reference/api-index/' | relative_url }})
+Compared to [`xtc_stats`]({{ '/reference/api/xtc_stats/' | relative_url }})
 (aggregate counters, for dashboards) and `xtc_trace` (the causal message
 trace), `xtc_tail` is the event-level tool: `xtc_stats` says the p99 poll time
 regressed; `xtc_tail` shows you the exact fiber, on the exact worker, that sat
@@ -145,7 +145,7 @@ short.
 Where `xtc_tail` records individual events, `xtc_stats` aggregates them:
 counters, gauges, and histograms you register once and update on the hot path,
 then read back for a dashboard or a Prometheus scrape. See
-[`xtc_stats(3)`]({{ '/reference/api-index/' | relative_url }}) for the full
+[`xtc_stats(3)`]({{ '/reference/api/xtc_stats/' | relative_url }}) for the full
 API.
 
 This section is the honest counterpart to the API reference: it says what
@@ -307,5 +307,5 @@ of reading a missing argument off the stack.
 Both calls share one record path: the same level floor, ring, sink and drop
 count. `xtc_logf` writes to the default logger, `xtc_logf_to(log, ...)` to a
 given one. The macros are C only: a C++ file that includes `xtc_log.h` gets
-`xtc_log_write` but not `xtc_logf`. See [`xtc_log(3)`]({{ '/reference/api-index/' | relative_url }})
+`xtc_log_write` but not `xtc_logf`. See [`xtc_log(3)`]({{ '/reference/api/xtc_log/' | relative_url }})
 for the full list of argument types and specs.

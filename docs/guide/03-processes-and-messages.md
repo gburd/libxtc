@@ -48,9 +48,14 @@ sits in `xtc_recv` until a message arrives. No shared memory, no locks.
 
 ```
 ping: got 1
+ping: got 2
 ping: got 3
-pong: reached 4, done
+ping: got 4
 ```
+
+`pong` adds one to every number it receives and `ping` echoes the reply
+back, so ping sees each value; when 4 arrives ping returns, and pong's
+next receive times out after a second and it returns too.
 
 ## Three things to notice
 
