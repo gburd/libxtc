@@ -290,10 +290,10 @@ message-passing system: "who sent this, and what caused that."
 
 libxtc's `seq_trace` answers it.  It is an opt-in, bounded ring of
 send/receive events, each stamped with a hybrid logical clock (HLC)
-and each receive linked to the send that caused it.  It is OFF by default and costs a single relaxed
-atomic load on the message hot path when disabled, so you turn it on
-for a specific investigation and off again -- it is not an always-on
-tax.
+and each receive linked to the send that caused it.  It is OFF by
+default and costs a single relaxed atomic load on the message hot path
+when disabled, so you turn it on for a specific investigation and off
+again; it is not an always-on tax.
 
 From inside the program, enable it, run the suspect workload, and dump
 the records in causal order (`xtc_trace(3)`):
