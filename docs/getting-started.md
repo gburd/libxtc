@@ -409,8 +409,9 @@ By layer of complexity:
    deadlock detector.  Demonstrates a custom victim picker
    driven by a coroutine.
 5. `examples/05_rexis/` -- Redis-protocol-compatible server with
-   hard resource budgets.  About 4,800 LOC; uses every major xtc
-   layer.
+   hard resource budgets.  About 4,900 lines of code (tokei over
+   the Makefile's SRCS and their headers, tests excluded); uses
+   every major xtc layer.
 6. `examples/06_sqlxtc/` -- a from-scratch SQL engine (parser,
    vectorized executor, B-link tree, buffer pool, WAL) served over
    the Quack protocol.  Multi-client, all I/O through xtc.
