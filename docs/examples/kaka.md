@@ -106,18 +106,18 @@ to the record and reads with `xtc_aio_pread`, so the partition proc parks
 while the kernel works and the loop keeps serving other connections. A
 large fetch is built 1 MiB at a time: after each slice the partition
 re-queues the rest of the request to itself and yields, so produces to
-the same partition interleave with it. Measured 2026-10 on libxtc 1.55
-(the fix in `4313594a`), on a 32-vCPU host (150,000 x 1 KB records,
-broker restarted so every read is cold): a 64 MiB FETCH went from 8.6 s
-to 0.47 s, and a PRODUCE to another topic issued during it went from
-8.0 s to 1 ms.
+the same partition interleave with it.  Measured 2026-10-13 (v1.55.0
+against the fix in `4313594a`, v1.55.0-2), on a 32-vCPU host (150,000 x
+1 KB records, broker restarted so every read is cold): a 64 MiB FETCH
+went from 8.6 s to 0.47 s, and a PRODUCE to another topic issued during
+it went from 8.0 s to 1 ms.
 
 - **Backpressure** comes from the connection: its proc has one request
   in flight and reads the next frame only after it has written the
-  reply, which is sent only once the record is durable. A producer that
-  sends faster than the partition acks fills its socket and is slowed by
-  TCP flow control. A client that wants several requests in flight
-  bounds them with a window; `broker_credit_selftest` shows the shape
+  reply, which (in the default mode) is sent only once the record is
+  durable.  A producer that sends faster than the partition acks fills
+  its socket and is slowed by TCP flow control.  A client that wants
+  several requests in flight bounds them with a window; `broker_credit_selftest` shows the shape
   with `xtc_credit` (budget 4 against 200 records, peak in-flight 4).
 
 ## How libxtc concepts are applied
@@ -162,10 +162,11 @@ to 0.47 s, and a PRODUCE to another topic issued during it went from
   and truncating on a torn tail are the fiddly parts. A segment is synced
   before the next one is created, so recovery CRC-checks only the newest
   segment and truncates its torn tail; a defect in an older segment fails
-  the partition open instead of silently renumbering records. When the
-  durable ack went in (2026-10, the 1.56 review), a crash harness killed
-  the broker with SIGKILL mid-flood 20 times and found every acked record
-  present after each restart. That harness is not shipped; `make soak`
+  the partition open instead of silently renumbering records.  When the
+  durable ack went in (2026-10-13, `4313594a`, the fix round for the 1.55
+  review), a crash harness killed the broker with SIGKILL mid-flood 20
+  times and found every acked record present after each restart.  That
+  harness is not shipped; `make soak`
   (8 producers and 8 consumers over TCP, every offset and byte checked)
   and `make soak-plant` are.
 - **No retention by time, no compaction.** Retention is by size only
