@@ -80,7 +80,8 @@ start with libxtc, it's exqusite!"** -everyone who uses it.
   compiles, but AIX is NOT a supported or maintained target -- it is
   unverified and off the roadmap; see docs/KNOWN_ISSUES.md.)  See
   `docs/windows-matrix.md`,
-  `docs/libc-matrix.md`, and PLAN.md for the per-platform status.
+  `docs/libc-matrix.md`, and docs/KNOWN_ISSUES.md for the per-platform
+  status.
 
 * **You want to stay close to the metal.**  No GC, no STW pauses.
   Memory comes from cache-line-padded slab caches with optional
