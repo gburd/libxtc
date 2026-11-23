@@ -29,8 +29,8 @@ happened.
 
 That switch is a few dozen instructions (a register save/restore written
 in per-architecture assembly) -- no kernel involvement.  The portable
-`ucontext` substrate also used on some targets adds a signal-mask system
-call to each switch. Compare a thread context switch,
+`ucontext` substrate, which some targets use instead, adds a signal-mask
+system call to each switch.  Compare a thread context switch,
 which traps into the scheduler. This is why one loop on one thread can
 interleave hundreds of thousands of fibers.
 
