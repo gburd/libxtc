@@ -370,8 +370,8 @@ follow-up).
 * `docs/abi-stability.md` -- the compatibility contract, split into what
   is mechanically enforced and what is only stated policy.
 * `docs/KNOWN_ISSUES.md` -- everything I know about that's not perfect.
-* `SECURITY.md` -- supported versions (the 2.0 LTS and the current
-  release) and how to report a vulnerability privately.
+* `SECURITY.md` -- supported versions (the 2.1 LTS line and the
+  development releases) and how to report a vulnerability privately.
 
 ## License
 

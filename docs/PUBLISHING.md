@@ -123,17 +123,17 @@ release and the candidate.
 
 ## Release branches and tags
 
-`main` carries the next minor.  A major's LTS line has its own branch,
-`lts/MAJOR.MINOR` (the first is `lts/2.0`), cut from the `vMAJOR.MINOR.0`
-tag on the day it is released:
+`main` carries the development releases (vYYYY.MM.DD, published as
+pre-releases).  The LTS line has its own branch, `lts/MAJOR.MINOR`; the
+current one is `lts/2.1`, cut from the v2.1.1 tag:
 
-    git branch lts/2.0 v2.0.0
-    git push origin lts/2.0
+    git branch lts/2.1 v2.1.1
+    git push origin lts/2.1
 
 Nothing is committed to an LTS branch directly except a backport that
 could not be cherry-picked.  What a patch release may change is the LTS
-contract in `docs/abi-stability.md` ("Long-term support and the 2.0
-LTS"): fixes only, no ABI, format, default or dependency change.
+contract in `docs/abi-stability.md` ("Long-term support and release
+lines"): fixes only, no ABI, format, default or dependency change.
 
 ## Patch releases on an LTS branch
 
@@ -141,7 +141,7 @@ LTS"): fixes only, no ABI, format, default or dependency change.
    for any change.
 2. Backport, naming the source commit:
 
-       git switch lts/2.0
+       git switch lts/2.1
        git cherry-pick -x <main-commit>
 
    If it does not apply, rewrite it on the branch with the same test and
@@ -155,13 +155,14 @@ LTS"): fixes only, no ABI, format, default or dependency change.
 4. Qualify on the branch exactly as a minor is qualified (AGENTS.md
    "Cutting a release"): `make check` on a readiness and a completion
    backend, `make check-dst` in a sim build, the 100k swarm by hand,
-   `scripts/perf-gate.sh vPREV HEAD` against the previous 2.0.x, and the
+   `scripts/perf-gate.sh vPREV HEAD` against the previous 2.1.x, and the
    io_uring gate.  The compat CI job must pass: the N-1 consumer built
-   against v2.0.0's headers runs against the patch release's library.
+   against the previous release's headers runs against the patch
+   release's library.
 5. Tag from the branch, signed, and push the tag:
 
-       git tag -s v2.0.N -m "libxtc 2.0.N"
-       git push origin lts/2.0 v2.0.N
+       git tag -s v2.1.N -m "libxtc 2.1.N"
+       git push origin lts/2.1 v2.1.N
 
 6. Check CI on the tag and on the branch (a tag does not run the nightly
    tiers; see AGENTS.md).
