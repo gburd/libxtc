@@ -123,6 +123,31 @@ test_sim_sqlxtc_uniq    4          1   p168 hand-off: the key after a deleted ha
 test_sim_sqlxtc_uniq    8          1   p168 hand-off: the same, a second shape; same commit
 test_sim_sqlxtc_uniq    55         1   p168 hand-off: found by the 1..400 re-review sweep (rr-sa); same commit
 test_sim_sqlxtc_uniq    64         1   p168 hand-off: found by the same sweep; same commit
+# p168/rderr (2.3.0).  A read of the tree that fails is an error, never
+# "absent" or "the end".  Seed 2 FAILS on the planted builds of bug 82
+# SCANSHORT ("SCAN: a scan whose read failed returned 0 rows of the g
+# group") and bug 83 PKREAD ("PKEY: an INSERT of existing key 2 was
+# committed"); seed 3 FAILS on bug 84 WWREAD ("LOST UPDATE: counter 18,
+# 22 increments acknowledged").  The clean build passes both.
+test_sim_sqlxtc_uniq    2          1   bug82/83: a short scan taken as whole; a duplicate key on a read error; fixed libxtc-examples 678b300, 238ed44
+test_sim_sqlxtc_uniq    3          1   bug84: a lost update on a read error; fixed libxtc-examples 4d47e8c
+# p168/rderr2: phase 2's last two cases.  Seed 1 FAILS on the planted builds
+# of bug 85 MAXROWID ("ROWID: committed row 1 of a0 overwritten (holds 9)":
+# an auto-rowid INSERT in a transaction took rowid 1 over a committed row)
+# and bug 86 REAPREAD ("REAP: a duplicate of the live UNIQUE value 10 went
+# into r0": the reap deleted a live entry), and on libxtc-examples before
+# each fix with the fault hook at the site; the clean build passes it.
+# p168/rderr3 re-verified seeds 1, 2 and 3 both ways after the reap case
+# moved to xstore_reap_read_fail and the max-rowid read went lazy: each
+# fails on its plant's build and on the fix taken back by hand (83: PKEY,
+# 85: ROWID, 86: REAP on 1, 2 and 3; 82: SCAN on 2; 84: LOST UPDATE on
+# 3), and passes clean.
+test_sim_sqlxtc_uniq    1          1   bug85/86: a committed row overwritten; a live UNIQUE entry reaped; fixed libxtc-examples e3343e2, c17b2be
+# p168/rderr3 SF-3: seed 1 FAILS on the planted build of bug 87 STMTATOMIC
+# ("ATOMIC: "UPDATE m SET v = v + 1" failed (rc 1) but changed m") and on
+# libxtc-examples with the implicit transaction turned off by hand; the
+# clean build passes it.
+test_sim_sqlxtc_uniq    1          1   bug87: a failed multi-row autocommit statement left rows committed; fixed libxtc-examples 0bb908c
 # p168/r12 (2.3.0, 2.1.5).  Seed 1 FAILS on the planted build (bug 79
 # IDREUSE) and on libxtc-examples before the fix: "IDREUSE: new table s has
 # id 2 and index id 4 (ids up to 2 / 3 handed out) and 1 rows", a dropped

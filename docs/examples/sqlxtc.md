@@ -231,6 +231,25 @@ is): its uncommitted writes are buffered privately and are invisible to
 other connections until COMMIT, and ROLLBACK discards only its own
 writes.
 
+A statement outside BEGIN ... COMMIT is atomic too.  One that writes a
+single row commits it directly, unless one of its reads failed (a
+correlated subquery that could not read its table): then it commits
+nothing.  One that writes more (a multi-row
+UPDATE, DELETE, INSERT ... SELECT or INSERT VALUES, or an UPDATE that
+moves a primary key) runs as an implicit transaction at SNAPSHOT
+isolation on the statement's own snapshot, and commits all of its rows
+at one timestamp or none of them: a read error, a UNIQUE violation, a
+row too large, or a kill of the connection partway leaves the tables as
+they were.  An INSERT that loses a key race to another session is
+re-run and reports `UNIQUE constraint failed`, as PostgreSQL does.  Two
+multi-row statements that take the same rows in opposite orders can
+deadlock; the youngest fails with `could not serialize access`.  The
+commit costs one fsync while the statement's buffered rows stay under
+256 KiB; a larger statement spills, and each spilled row then waits for
+its own fsync, about the speed of one commit per row.  An UPDATE,
+DELETE, INSERT ... SELECT or INSERT VALUES changes at most 100,000 rows;
+one over that fails with `too many rows` and changes nothing.
+
 | Level | Reads | Write-write conflicts | Selected by |
 | --- | --- | --- | --- |
 | SNAPSHOT (default), REPEATABLE READ | one snapshot per transaction | the second writer of a row waits for the first; if the first commits, the second's statement fails | default / `BEGIN ISOLATION LEVEL REPEATABLE READ` |
@@ -623,7 +642,12 @@ flowchart TD
   with the handle the open transaction is rolled back, freeing its
   snapshot (the version-GC horizon) and row intents. Each request runs
   with cancellation masked, so the kill takes effect between
-  statements, never with a page latch held. Faults are not contained:
+  statements, never with a page latch held, and a write statement whose
+  connection has a kill pending commits nothing, whether it changes one
+  row or many. A DDL statement that waits on another's schema lock
+  when the storage engine stops fails with `cannot change the schema:
+  the storage engine is shutting down` instead of waiting out the
+  shutdown. Faults are not contained:
   sqlxtc installs no `xtc_fault_guard`, so a fault in any fiber ends the
   process. That is deliberate for a storage engine -- a fault taken while
   holding a page latch or the commit lock leaves shared state that cannot
@@ -671,7 +695,11 @@ flowchart TD
   transaction workload -- with injected torn writes, crashes, and
   fsync-loss -- from a seed. Crash safety is tested at three levels: the
   simulator (seeded crashes, torn writes, lost fsyncs), the server under
-  repeated kill -9 with every acknowledged commit checked after restart,
+  repeated kill -9 with every acknowledged commit checked after restart
+  (`test_crash_oracle` also kills multi-row autocommit statements, at a
+  random time and at planned points before and after each kind's commit
+  record is durable, and checks that each one is all there or not
+  there),
   and injected log-write failures (a file-size limit makes every write
   past it fail) where every acknowledged commit must survive and every
   failed one must have returned an error. See

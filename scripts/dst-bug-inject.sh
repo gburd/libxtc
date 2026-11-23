@@ -130,6 +130,12 @@ write_cases() {
 		"73;test_sim_sqlxtc_uniq;1;1;(UNIQUE: value [0-9]+ \\((49[89]|[5-9][0-9]{2}|[0-9]{4}) bytes\\) is held by|INDEX: value)" \
 		"80;test_sim_sqlxtc_uniq;1;1;UNIQUE: value [0-9]+ \\([0-9]+ bytes\\) is held by ([2-9]|[1-9][0-9]+) rows" \
 		"81;test_sim_sqlxtc_uniq;1;1;(INDEX|SNAPSHOT): the g group:? (index|under one snapshot)" \
+		"82;test_sim_sqlxtc_uniq;1;1;SCAN: a scan whose read failed returned [0-9]+ rows" \
+		"83;test_sim_sqlxtc_uniq;1;1;PKEY: an INSERT of existing key 2 was committed" \
+		"84;test_sim_sqlxtc_uniq;1;1;LOST UPDATE: counter [0-9]+, [0-9]+ increments acknowledged" \
+		"85;test_sim_sqlxtc_uniq;1;1;ROWID: committed row 1 of a[0-9]+ overwritten" \
+		"86;test_sim_sqlxtc_uniq;1;1;REAP: a duplicate of the live UNIQUE value 10 went into r[0-9]+" \
+		"87;test_sim_sqlxtc_uniq;1;1;ATOMIC: .* failed \\(rc [0-9-]+\\) but changed m" \
 		"76;test_sim_recv_mark;0;1;a marked receive skipped a reply" \
 		"77;test_sim_forged_down;0;1;a forged DOWN restarted a live child" \
 		"78;test_sim_forged_down;0;1;a forged DOWN dropped a live name" \
@@ -236,6 +242,18 @@ write_cases() {
 # 79 IDREUSE    xstore.c allocates ids from the live catalog rows only
 #               -> a table or index created after a DROP (and the GC or log
 #               dump that removes its tombstone) takes a fresh id and is empty
+# 82 SCANSHORT  xstore.c a failed base-scan read ends the scan as the
+#               table's end -> a scan whose read failed returns no count
+# 83 PKREAD     xstore.c the INSERT key check reads an unreadable row as
+#               absent -> an INSERT of an existing key never commits
+# 84 WWREAD     xstore.c the write-write check reads an unreadable row as
+#               having no newer version -> no acknowledged increment lost
+# 85 MAXROWID   xstore.c a failed max-rowid descent reads as an empty
+#               table -> an auto-rowid INSERT never overwrites a committed row
+# 86 REAPREAD   xstore.c a failed step of the UNIQUE reap's reuse check
+#               reads "not reused" -> a live UNIQUE entry is never reaped
+# 87 STMTATOMIC xstore.c a multi-row autocommit statement commits each
+#               row on its own -> a statement that fails leaves no row
 #
 # Bug 13 fires before slot reuse: setup cancel(handle4) incorrectly finds
 # slot0/handle1. Its terminal callback expects OK but receives ABORTED.

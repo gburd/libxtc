@@ -80,6 +80,32 @@ is unchanged.  New symbol: `xtc_recv_match_ex` (`XTC_2.3`), new type
 `xtc_msg_info_t`.  See xtc_proc(3) "Seeing the sender and system
 messages".
 
+## FIXED (2.3.0): a failed sqlxtc statement could leave some of its rows committed
+
+An autocommit UPDATE, DELETE, INSERT ... SELECT or multi-row INSERT
+VALUES committed each row on its own.  A failure partway (a page read
+error, a UNIQUE violation met by a later row, a row too large) left the
+earlier rows committed while the client was told the statement failed,
+so a client that retried applied it twice; a kill of the connection let
+the whole statement commit for a connection that never heard back.  Two
+such UPDATEs racing on one table left part of a statement reported as
+failed applied.  2.3.0 runs a multi-row autocommit statement as an
+implicit transaction that commits all of its rows or none, and a
+one-row statement commits nothing when one of its reads failed (a
+correlated subquery) or a kill is pending.  An INSERT that loses a key
+race to another session still reports `UNIQUE constraint failed`: the
+statement re-runs, and its key check finds the key.  An UPDATE, DELETE,
+INSERT ... SELECT or INSERT VALUES over the 100,000-row limit fails
+with `too many rows: ... the limit for one statement` (it said
+`unsupported SQL (native engine)`, or nothing; INSERT VALUES had no
+limit).  `examples/06_sqlxtc/test_stmt_atomic`, `test_insert_race` and
+`test_crash_oracle`, and the DST tier `test_sim_sqlxtc_uniq` (planted
+bug 87), check the behaviour, which 2.2.0 gets wrong; the tests
+themselves do not build against 2.2.0, since the read-fault hooks they
+arm are newer.  The commit costs one fsync only while the statement's
+buffered rows stay under 256 KiB; past that each spilled row waits for
+its own fsync.
+
 ## FIXED (2.3.0, 2.1.4): sqlxtc indexes missed long keys, and UNIQUE let them repeat
 
 An index key longer than one B-tree key (497 bytes on 4 KiB pages; a
@@ -2624,6 +2650,9 @@ isolation defects were fixed (1.56); what remains is recorded here.
   SERIALIZABLE fail a write-write conflict at the conflicting statement
   (1.58: row write intents; before 1.58, at COMMIT) with "could not
   serialize access due to concurrent update".  Clients must retry.
+  Autocommit statements re-run on a stale conflict instead (2.3.0: a
+  multi-row INSERT too, which then reports a lost key race as UNIQUE);
+  a deadlock still fails one of them.
 * **kaka is not Kafka.**  It spawns one proc per connection, has no
   consumer-group membership/rebalancing, no time-based retention, and no
   METADATA request.  Produces are acknowledged only after a group-commit

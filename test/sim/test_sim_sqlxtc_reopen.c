@@ -865,7 +865,7 @@ scratch_ddl(const char *kind)
 	bad = sx_open(":memory:", &h) != SX_OK ||
 	    sx_exec(h, "CREATE TABLE s(k INTEGER PRIMARY KEY, v TEXT)", NULL) != SX_OK ||
 	    sx_exec(h, "CREATE INDEX s_v ON s(v)", NULL) != SX_OK ||
-	    !xstore_table_id(sx_storage_bt(), "s", &tid);
+	    xstore_table_id(sx_storage_bt(), "s", &tid) != 1;
 	if (!bad && sx_prepare(h, "SELECT count(*) FROM s", -1, &st, NULL) == SX_OK &&
 	    sx_step(st) == SX_ROW)
 		n = sx_column_int64(st, 0);
@@ -932,7 +932,7 @@ drop_gap(void)
 	    sx_exec(h, "CREATE TABLE g(k INTEGER PRIMARY KEY, v TEXT)", NULL) != SX_OK ||
 	    sx_exec(h, "INSERT INTO g VALUES(1, 'kept')", NULL) != SX_OK ||
 	    sx_exec(h, "CREATE INDEX gi ON g(v)", NULL) != SX_OK ||
-	    !xstore_table_id(sx_storage_bt(), "g", &tg);
+	    xstore_table_id(sx_storage_bt(), "g", &tg) != 1;
 	if (!bad) {
 		xtc_sim_activate(g_seed);
 		xtc_sim_buggify_enable(1000);
@@ -953,7 +953,7 @@ drop_gap(void)
 		FAILF("final: DROPGAP: table g (id %u), its row or index gi lost "
 		    "to a crash before the DROP's tombstone", tg);
 	if (!bad && (sx_exec(h, "CREATE TABLE n(k INTEGER PRIMARY KEY)", NULL) != SX_OK ||
-	    !xstore_table_id(sx_storage_bt(), "n", &tn) || tn <= tg))
+	    xstore_table_id(sx_storage_bt(), "n", &tn) != 1 || tn <= tg))
 		FAILF("final: DROPGAP: new table n has id %u, g had %u", tn, tg);
 	if (h != NULL)
 		sx_close(h);
@@ -989,7 +989,7 @@ open_store(const char **kind)
 		    sx_exec(h, "CREATE TABLE t(k INTEGER PRIMARY KEY, u TEXT UNIQUE, "
 		    "g INTEGER, w INTEGER, p TEXT)", NULL) != SX_OK ||
 		    sx_exec(h, "CREATE INDEX t_g ON t(g)", NULL) != SX_OK;
-		if (!bad && !xstore_table_id(sx_storage_bt(), "t", &g_sh->max_tid))
+		if (!bad && xstore_table_id(sx_storage_bt(), "t", &g_sh->max_tid) != 1)
 			bad = 1;
 		g_sh->max_iid = max_index_id("t");
 		if (h != NULL)
