@@ -70,7 +70,8 @@ jobs:
     # kind: a CalVer tag is a development release, a SemVer tag an LTS
     # release, anything else fails.  Since a CalVer name can only come
     # from dist/release.in, an LTS tree cannot publish a CalVer tag and
-    # a development tree cannot publish a SemVer one.
+    # a development tree cannot publish a SemVer one.  A CalVer tag also
+    # needs dist/release-notes.md, the release body.
     runs-on: ubuntu-latest
     needs: ci
     outputs:
@@ -95,6 +96,15 @@ jobs:
           v[0-9]*.[0-9]*.[0-9]*) kind=lts ;;
           *) echo "FAIL: ${GITHUB_REF_NAME} is neither CalVer nor SemVer"; exit 1 ;;
           esac
+          # A development release's body is the curated notes committed
+          # with it (docs/PUBLISHING.md, "Development releases from
+          # main"), so a CalVer tag without them is refused here, before
+          # anything is built.
+          if [ "$kind" = dev ] && [ ! -s dist/release-notes.md ]; then
+            echo "FAIL: ${GITHUB_REF_NAME} is a development release, and its commit"
+            echo "has no dist/release-notes.md to be the release body"
+            exit 1
+          fi
           echo "kind=$kind"
           {
             echo "version=$ver"
@@ -249,27 +259,21 @@ jobs:
           tar -tzf "libxtc-man-$VER.tar.gz" | grep -q 'man/man3/.*\.3' \
             || { echo "FAIL: man bundle has no man3 pages"; exit 1; }
 
-      - name: Release notes from changelog
-        # debian/changelog is SemVer: an LTS release has its own entry,
-        # and a development release is described by the entry of its ABI
-        # level (2.3.0 for the first CalVer release), under a line that
-        # names it.  The maintainer may replace a development release's
-        # body afterwards (gh release edit --notes-file).
+      - name: Release notes
+        # A development release's body is dist/release-notes.md, which
+        # verify-tag has checked is there.  An LTS release's body is its
+        # own debian/changelog entry.
         run: |
           set -eu
           if [ "$KIND" = dev ]; then
-            printf 'libxtc %s: a development release from main (pre-release),\n' "$VER" > notes.md
-            printf 'ABI level %s, SONAME libxtc.so.%s.\n\n' "$ABI" "${ABI%%.*}" >> notes.md
-            entry=$ABI
-          else
-            : > notes.md
-            entry=$VER
+            cp dist/release-notes.md notes.md
+            exit 0
           fi
-          awk -v v="$entry" '
+          awk -v v="$VER" '
             $0 ~ "^libxtc \\("v {p=1}
             p && /^libxtc \(/ && $0 !~ v {exit}
             p {print}
-          ' debian/changelog >> notes.md
+          ' debian/changelog > notes.md
           if [ ! -s notes.md ]; then
             echo "libxtc $VER" > notes.md
           fi

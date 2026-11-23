@@ -49,6 +49,11 @@ jobs:
           v20[0-9][0-9].*) pre=true ;;
           *) pre=false ;;
           esac
+          # A development release's body is dist/release-notes.md.
+          if [ "$pre" = true ] && [ ! -s dist/release-notes.md ]; then
+            echo "FAIL: ${GITHUB_REF_NAME} has no dist/release-notes.md"
+            exit 1
+          fi
           echo "version=$ver" >> "$GITHUB_OUTPUT"
           echo "prerelease=$pre" >> "$GITHUB_OUTPUT"
 
@@ -82,9 +87,13 @@ jobs:
           ver='${{ steps.ver.outputs.version }}'
           tar -czf "libxtc-man-$ver.tar.gz" man/
 
-      - name: Release notes from changelog
+      - name: Release notes
         run: |
           ver='${{ steps.ver.outputs.version }}'
+          if [ '${{ steps.ver.outputs.prerelease }}' = true ]; then
+            cp dist/release-notes.md notes.md
+            exit 0
+          fi
           awk -v v="$ver" '
             $0 ~ "^libxtc \\("v {p=1}
             p && /^libxtc \(/ && $0 !~ v {exit}

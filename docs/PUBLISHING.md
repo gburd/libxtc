@@ -199,16 +199,20 @@ how the two versions reach the build.
    in `dist/libxtc.map`), the patch when only fixes were.  Regenerate
    and commit `dist/configure`, and add the ABI level's entry to
    `debian/changelog` and `dist/xtc.spec` if it has none.  Those entries
-   name the ABI level, not the date: the packages are built only for
-   LTS releases, and the release body is taken from the entry.
-2. Write the name into dist/release.in, in the same commit as anything
-   else the release needs:
+   name the ABI level, not the date, because the packages are built
+   only for LTS releases.
+2. Write the name into dist/release.in and the release body into
+   dist/release-notes.md, in the same commit as anything else the
+   release needs:
 
        echo 2026.11.24 > dist/release.in
-       git add -f dist/release.in
+       $EDITOR dist/release-notes.md
+       git add -f dist/release.in dist/release-notes.md
 
-   (`-f` because a global gitignore may cover `dist/`.)  The build then
-   reports `xtc_version_string()` = "2026.11.24" and pkg-config Version
+   (`-f` because a global gitignore may cover `dist/`.)  The release
+   workflow publishes dist/release-notes.md as the release body, word
+   for word, and refuses a CalVer tag whose commit has none.  The build
+   then reports `xtc_version_string()` = "2026.11.24" and pkg-config Version
    2026.11.24, while the SONAME stays libxtc.so.2 and the file
    libxtc.so.2.3.0.
 3. Qualify exactly as an LTS patch (step 4 above), with perf-gate
@@ -224,10 +228,11 @@ how the two versions reach the build.
    publishes a pre-release (never "Latest") with the source tarball,
    the amalgamation and the man-page bundle, and builds no distro
    packages.  On Codeberg, create the release by hand as a pre-release
-   (`tea releases create --prerelease`) with the same three files.
-5. Remove dist/release.in in the next commit on `main`, so a tree
-   between releases is named by its ABI level and cannot be mistaken
-   for the release.
+   (`tea releases create --prerelease`) with the same three files and
+   dist/release-notes.md as the body.
+5. Remove dist/release.in and dist/release-notes.md in the next commit
+   on `main`, so a tree between releases is named by its ABI level and
+   cannot be mistaken for the release.
 6. Check CI on the tag, as for an LTS release, and check that the
    newest v2.1.N is still "Latest" on both forges.
 
