@@ -1,6 +1,16 @@
 name: Release
 
-# Triggered by pushing a tag matching v* (e.g. v1.7.0).  Runs the FULL CI
+# Triggered by pushing a tag matching v*.  Two kinds of tag (docs/
+# abi-stability.md, "Long-term support and release lines"):
+#   v2.1.N        an LTS release from lts/2.1, SemVer.  Published as the
+#                 normal release and marked Latest.
+#   vYYYY.MM.DD   a development release from main, CalVer (with .N for a
+#                 second release on one day).  Published as a PRE-RELEASE
+#                 and never marked Latest.
+# Both kinds ship the same three source artifacts and nothing else (no
+# distro packages).  verify-tag decides the kind; publish reads it.
+#
+# Runs the FULL CI
 # suite against the tagged commit, then builds the three artifacts (source
 # tarball, single-file amalgamation, man-page bundle), TEST-BUILDS the
 # source tarball exactly as a packager would, and only then attaches them
@@ -52,27 +62,45 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   verify-tag:
-    # GATE 2: the tag must name the version the tree declares.  A tag
-    # whose name disagrees with dist/version.in would publish artifacts
-    # named for one version from the source of another; every existing
-    # tag satisfies this, so it is a real invariant, not a new hurdle.
+    # GATE 2: the tag must name the release the tree declares.  A tag
+    # whose name disagrees with the tree would publish artifacts named
+    # for one release from the source of another.  The release name is
+    # dist/release_name.sh's: dist/release.in on a development release,
+    # else the ABI level in dist/version.in.  The tag's shape gives the
+    # kind: a CalVer tag is a development release, a SemVer tag an LTS
+    # release, anything else fails.  Since a CalVer name can only come
+    # from dist/release.in, an LTS tree cannot publish a CalVer tag and
+    # a development tree cannot publish a SemVer one.
     runs-on: ubuntu-latest
     needs: ci
     outputs:
       version: ${{ steps.ver.outputs.version }}
+      abi: ${{ steps.ver.outputs.abi }}
+      kind: ${{ steps.ver.outputs.kind }}
     steps:
       - uses: actions/checkout@v4
-      - name: Tag name must match dist/version.in
+      - name: Tag name must match the tree's release name
         id: ver
         run: |
           set -eu
-          ver="$(tr -d '[:space:]' < dist/version.in)"
-          echo "version=$ver" >> "$GITHUB_OUTPUT"
-          echo "tag=${GITHUB_REF_NAME}  dist/version.in=$ver"
+          ver="$(sh dist/release_name.sh dist)"
+          abi="$(tr -d '[:space:]' < dist/version.in)"
+          echo "tag=${GITHUB_REF_NAME}  release name=$ver  ABI level=$abi"
           if [ "${GITHUB_REF_NAME}" != "v$ver" ]; then
-            echo "FAIL: tag ${GITHUB_REF_NAME} != v$ver from dist/version.in"
+            echo "FAIL: tag ${GITHUB_REF_NAME} != v$ver from dist/release_name.sh"
             exit 1
           fi
+          case "${GITHUB_REF_NAME}" in
+          v20[0-9][0-9].*) kind=dev ;;
+          v[0-9]*.[0-9]*.[0-9]*) kind=lts ;;
+          *) echo "FAIL: ${GITHUB_REF_NAME} is neither CalVer nor SemVer"; exit 1 ;;
+          esac
+          echo "kind=$kind"
+          {
+            echo "version=$ver"
+            echo "abi=$abi"
+            echo "kind=$kind"
+          } >> "$GITHUB_OUTPUT"
 
   build:
     # GATE 3: produce the artifacts and PROVE the published ones work.
@@ -83,6 +111,8 @@ jobs:
     needs: verify-tag
     env:
       VER: ${{ needs.verify-tag.outputs.version }}
+      ABI: ${{ needs.verify-tag.outputs.abi }}
+      KIND: ${{ needs.verify-tag.outputs.kind }}
     steps:
       - uses: actions/checkout@v4
 
@@ -220,12 +250,26 @@ jobs:
             || { echo "FAIL: man bundle has no man3 pages"; exit 1; }
 
       - name: Release notes from changelog
+        # debian/changelog is SemVer: an LTS release has its own entry,
+        # and a development release is described by the entry of its ABI
+        # level (2.3.0 for the first CalVer release), under a line that
+        # names it.  The maintainer may replace a development release's
+        # body afterwards (gh release edit --notes-file).
         run: |
-          awk -v v="$VER" '
+          set -eu
+          if [ "$KIND" = dev ]; then
+            printf 'libxtc %s: a development release from main (pre-release),\n' "$VER" > notes.md
+            printf 'ABI level %s, SONAME libxtc.so.%s.\n\n' "$ABI" "${ABI%%.*}" >> notes.md
+            entry=$ABI
+          else
+            : > notes.md
+            entry=$VER
+          fi
+          awk -v v="$entry" '
             $0 ~ "^libxtc \\("v {p=1}
             p && /^libxtc \(/ && $0 !~ v {exit}
             p {print}
-          ' debian/changelog > notes.md
+          ' debian/changelog >> notes.md
           if [ ! -s notes.md ]; then
             echo "libxtc $VER" > notes.md
           fi
@@ -255,6 +299,7 @@ jobs:
     needs: [ci, verify-tag, build]
     env:
       VER: ${{ needs.verify-tag.outputs.version }}
+      KIND: ${{ needs.verify-tag.outputs.kind }}
     steps:
       - name: Download the tested artifacts
         uses: actions/download-artifact@v4
@@ -270,9 +315,13 @@ jobs:
           done
           ls -l
       - name: Create GitHub Release and upload artifacts
+        # A development release is a pre-release and never Latest; an LTS
+        # release is the normal release and becomes Latest.
         uses: softprops/action-gh-release@v2
         with:
           body_path: notes.md
+          prerelease: ${{ needs.verify-tag.outputs.kind == 'dev' }}
+          make_latest: ${{ needs.verify-tag.outputs.kind == 'lts' && 'true' || 'false' }}
           files: |
             libxtc-${{ env.VER }}.tar.gz
             libxtc-amalgamation-${{ env.VER }}.tar.gz

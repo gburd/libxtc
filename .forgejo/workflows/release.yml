@@ -1,6 +1,15 @@
 name: Release
 
-# Triggered by pushing a tag matching v* (e.g. v1.7.0).  Confirms the
+# NOT RUN: Codeberg disabled hosted Forgejo Actions for this repository
+# (AGENTS.md, "Continuous integration"); Codeberg releases are made by
+# hand with tea.  Kept in step with .github/workflows/release.yml.
+#
+# Two kinds of tag: v2.1.N, an LTS release (the normal release), and
+# vYYYY.MM.DD[.N], a development release from main, created as a
+# pre-release.  Forgejo's "Latest" is the newest release that is not a
+# pre-release, so the LTS stays Latest.
+#
+# Triggered by pushing a tag matching v* (e.g. v2.1.6).  Confirms the
 # tag builds, produces three artifacts (source tarball, single-file
 # amalgamation, man-page bundle), and attaches them to a Forgejo /
 # Codeberg Release for the tag via the release API.  Does not touch
@@ -32,7 +41,16 @@ jobs:
 
       - name: Derive version
         id: ver
-        run: echo "version=$(cat dist/version.in)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -eu
+          ver="$(sh dist/release_name.sh dist)"
+          test "${GITHUB_REF_NAME}" = "v$ver"
+          case "${GITHUB_REF_NAME}" in
+          v20[0-9][0-9].*) pre=true ;;
+          *) pre=false ;;
+          esac
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$pre" >> "$GITHUB_OUTPUT"
 
       - name: Autoreconf
         working-directory: dist
@@ -84,6 +102,7 @@ jobs:
           REPO: ${{ forge.repository }}
           TAG: ${{ github.ref_name }}
           VER: ${{ steps.ver.outputs.version }}
+          PRE: ${{ steps.ver.outputs.prerelease }}
         run: |
           set -eu
           # Create the release (idempotent: reuse if it already exists).
@@ -92,7 +111,7 @@ jobs:
             -H "Authorization: token ${FORGE_TOKEN}" \
             -H 'Content-Type: application/json' \
             "${FORGE_API}/repos/${REPO}/releases" \
-            -d "{\"tag_name\":\"${TAG}\",\"name\":\"${TAG}\",\"body\":${body}}" \
+            -d "{\"tag_name\":\"${TAG}\",\"name\":\"${TAG}\",\"prerelease\":${PRE},\"body\":${body}}" \
             | jq -r '.id // empty')"
           if [ -z "$rel_id" ]; then
             rel_id="$(curl -sS \
