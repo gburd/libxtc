@@ -368,7 +368,8 @@ the autotools build: it compiles the full static (and, with
 `-Dshared=true`, shared) library from the same source list, with the
 same io-backend / coroutine / TLS selection, and `meson test` registers
 127 of the same C test binaries (measured: `meson test --list | wc -l`)
-against `make check`'s 144-entry C tier.  The exported
+against `make check`'s 145-entry C tier (144 without the examples).
+The exported
 `xtc_*` / `__xtc_*` symbol set is identical to the autotools
 `libxtc.a` at the same optimization level (measured 2026-11-22 with
 `nm -g --defined-only`: 1029 defined symbols each, zero difference).  Its options mirror
