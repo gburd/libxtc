@@ -175,9 +175,9 @@ compiled and run by `make check` -- doc code is a release gate here.
 
 ## Where it shines
 
-`examples/05_rexis/` is a working Redis-protocol server in about 4,900
+`examples/05_rexis/` is a working Redis-protocol server in about 5,700
 lines of code (command handling, storage, connections, expiry, metrics;
-tokei over its Makefile's SRCS and their headers, tests excluded).  It
+tokei over its Makefile's SRCS and the server headers, tests excluded).  It
 uses every major xtc subsystem and stays inside hard
 `--max-memory`,
 `--max-keys`, `--max-clients`, `--max-iops`, and `--cores` caps under

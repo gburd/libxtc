@@ -417,11 +417,11 @@ By layer of complexity:
 3. `examples/03_supervised_app.c` -- crash a worker, watch the
    supervisor restart it.  OTP-style fault tolerance.
 4. `examples/04_lockmgr_demo.c` -- transactional locking with a
-   deadlock detector.  Demonstrates a custom victim picker
-   driven by a coroutine.
+   deadlock detector.  Demonstrates a custom victim picker that
+   draws from its own shuffled deck.
 5. `examples/05_rexis/` -- Redis-protocol-compatible server with
-   hard resource budgets.  About 4,900 lines of code (tokei over
-   the Makefile's SRCS and their headers, tests excluded); uses
+   hard resource budgets.  About 5,700 lines of code (tokei over
+   the Makefile's SRCS and the server headers, tests excluded); uses
    every major xtc layer.
 6. `examples/06_sqlxtc/` -- a from-scratch SQL engine (parser,
    vectorized executor, B-link tree, buffer pool, WAL) served over
