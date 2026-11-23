@@ -1,9 +1,10 @@
 #!/bin/sh
 # test/m0/test_readme_build.sh
-# Verifies M0_CLAIMS.md [D1]: the build commands in README.md actually work.
+# Verifies that the build commands in README.md work.
 #
-# Strategy: pull the lines tagged with comments `# M0_CLAIMS:B1` and
-# `# M0_CLAIMS:B2` from README.md and run the B1 sequence in a tmp dir.
+# Strategy: pull the lines between README.md's `<!-- M0_CLAIMS:B1_BEGIN -->`
+# and `_END -->` markers (and the B2 pair) and run the B1 sequence in a tmp
+# dir.  The markers are tags this test parses; M0_CLAIMS.md is long gone.
 # The B2 (meson) sequence is run only if meson is on PATH.
 
 set -eu

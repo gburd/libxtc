@@ -3,7 +3,7 @@
  * Use of this source code is governed by the ISC License.
  *
  * test/m0/test_header.c
- *	Verifies M0_CLAIMS.md [C4]: <xtc.h> alone is sufficient.
+ *	Verifies that <xtc.h> alone is sufficient.
  *
  * The proof is mechanical: this translation unit includes ONLY
  * <xtc.h> (and standard headers it pulls itself), references

@@ -3,7 +3,7 @@
  * Use of this source code is governed by the ISC License.
  *
  * test/m0/test_errors.c
- *	Verifies M0_CLAIMS.md [C6]: error contract.
+ *	Verifies the error contract.
  *	  - XTC_OK == 0.
  *	  - Every XTC_E_* < 0.
  *	  - xtc_strerror returns non-NULL stable text for known codes,

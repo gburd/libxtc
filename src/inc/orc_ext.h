@@ -1,5 +1,4 @@
 /* DO NOT EDIT: automatically built by dist/s_include. */
-/* See M0_CLAIMS.md [T2]. */
 
 #ifndef ORC_EXT_H
 #define ORC_EXT_H

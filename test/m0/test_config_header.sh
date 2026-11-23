@@ -1,6 +1,6 @@
 #!/bin/sh
 # test/m0/test_config_header.sh
-# Verifies M0_CLAIMS.md [B7]: xtc_config.h defines the four version macros.
+# Verifies that xtc_config.h defines the four version macros.
 
 set -eu
 

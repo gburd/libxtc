@@ -399,7 +399,7 @@ SHARED_LIB_TARGETS_no  =
 SHARED_LIB_TARGETS     = $(SHARED_LIB_TARGETS_$(XTC_ENABLE_SHARED))
 
 # -------------------------------------------------------------------------
-# Tests (M0).  See M0_CLAIMS.md.
+# Tests (M0).
 # -------------------------------------------------------------------------
 TESTS_SH	= \
 	$(abs_top_srcdir)/../test/m0/test_oos_enforced.sh \

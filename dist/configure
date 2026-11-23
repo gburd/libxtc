@@ -2599,7 +2599,7 @@ case $host_os in *\ *) host_os=`echo "$host_os" | sed 's/ /-/g'`;; esac
 
 
 # -------------------------------------------------------------------------
-# Out-of-source build is mandatory.  See M0_CLAIMS.md [B3,B6].
+# Out-of-source build is mandatory (test/m0/test_oos_enforced.sh).
 # -------------------------------------------------------------------------
 { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for an out-of-source build" >&5
 printf %s "checking for an out-of-source build... " >&6; }

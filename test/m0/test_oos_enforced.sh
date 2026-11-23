@@ -1,7 +1,7 @@
 #!/bin/sh
 # test/m0/test_oos_enforced.sh
 #
-# Verifies M0_CLAIMS.md [B3, B6]: configure refuses to run inside the
+# Verifies that configure refuses to run inside the
 # source root or inside dist/.
 #
 # Strategy: invoke ../dist/configure from the source root and from
