@@ -1,9 +1,9 @@
 name: CI
 
-# Mirror of the Codeberg CI for the GitHub mirror.  Builds libxtc and
-# runs the full test suite across gcc + clang plus ASan/UBSan.  See
-# .forgejo/workflows/ci.yml for the canonical version and the notes
-# on why autotools (not meson) is the path under test.
+# The project's CI (GitHub Actions on the mirror of the Codeberg
+# repository; hosted Forgejo Actions is disabled).  Builds libxtc and
+# runs the full test suite across gcc + clang plus ASan/UBSan.
+# .forgejo/workflows/ is not run (see AGENTS.md, "Continuous integration").
 
 on:
   push:
