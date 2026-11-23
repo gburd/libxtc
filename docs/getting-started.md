@@ -57,8 +57,8 @@ Run the test suite to confirm nothing is broken on your platform:
 make check
 ```
 
-You should see a line like `269 of 269 tests successful`.  If
-something fails, check `docs/KNOWN_ISSUES.md` -- some platforms
+It ends with `All tests passed.` (and a summary of anything it
+skipped, and why).  If something fails, check `docs/KNOWN_ISSUES.md` -- some platforms
 have intentional skips that look like failures at a glance.
 
 Install (optional):
@@ -103,9 +103,13 @@ main(void)
 Compile:
 
 ```sh
-cc hello.c -lxtc -lpthread -o hello
+cc hello.c $(pkg-config --cflags --libs --static xtc) -o hello
 ./hello
 ```
+
+`pkg-config --static` adds what libxtc.a was built against (liburing,
+the TLS library); a bare `-lxtc -lpthread` fails to link when the build
+found either.  The examples below compile the same way.
 
 Output: `hello from a task`.
 
@@ -171,7 +175,7 @@ main(void)
 Compile and run:
 
 ```sh
-cc pingpong.c -lxtc -lpthread -o pingpong
+cc pingpong.c $(pkg-config --cflags --libs --static xtc) -o pingpong
 ./pingpong
 ```
 
@@ -306,10 +310,13 @@ conn_proc(void *arg)
     free(a);
 }
 
+static xtc_loop_t *loop;
+static int listen_fd;
+
 static void
 listener(void *arg)
 {
-    int listen_fd = *(int *)arg;
+    (void)arg;
     for (;;) {
         uint32_t revents;
         int conn_fd;
@@ -319,22 +326,20 @@ listener(void *arg)
         if (xtc_proc_wait_fd(listen_fd, XTC_IO_READABLE, -1, &revents)
             != XTC_OK)
             break;
-        conn_fd = accept(listen_fd, NULL, NULL);
-        if (conn_fd < 0) continue;
-        xtc_net_setnonblock(conn_fd);
+        /* Non-blocking accept: XTC_E_AGAIN when another wakeup took
+         * the connection first. */
+        if (xtc_net_accept(listen_fd, &conn_fd) != XTC_OK) continue;
 
         a = malloc(sizeof *a);
         a->fd = conn_fd;
-        xtc_proc_spawn(__xtc_current_loop, conn_proc, a, NULL, &pid);
+        xtc_proc_spawn(loop, conn_proc, a, NULL, &pid);
     }
 }
 
 int
 main(void)
 {
-    xtc_loop_t *loop;
     xtc_tcp_opts_t opts = XTC_TCP_OPTS_INIT;
-    int listen_fd;
     xtc_pid_t pid;
 
     if (xtc_net_listen(XTC_NET_INET, "127.0.0.1", 7777, &opts, &listen_fd)
@@ -343,7 +348,7 @@ main(void)
         return 1;
     }
     xtc_loop_create(&loop);
-    xtc_proc_spawn(loop, listener, &listen_fd, NULL, &pid);
+    xtc_proc_spawn(loop, listener, NULL, NULL, &pid);
     printf("echo server listening on 127.0.0.1:7777\n");
     xtc_loop_run(loop);
     xtc_loop_destroy(loop);
@@ -355,7 +360,7 @@ main(void)
 Compile and run:
 
 ```sh
-cc echo_server.c -lxtc -lpthread -o echo_server
+cc echo_server.c $(pkg-config --cflags --libs --static xtc) -o echo_server
 ./echo_server &
 nc 127.0.0.1 7777
 hello
@@ -368,12 +373,15 @@ What's happening:
 * The `listener` process loops on `xtc_proc_wait_fd(listen_fd,
   XTC_IO_READABLE, -1)` -- this sleeps the process until the listen
   fd has a connection waiting, no busy-polling.
-* Each `accept` spawns a new `xtc_proc` for that connection.
+* Each `xtc_net_accept` returns a non-blocking socket and the
+  listener spawns a new `xtc_proc` for it.
 * The conn_proc loops on `xtc_proc_wait_fd(client_fd, ...)` and
   echoes bytes back.
 
 A thousand idle connections cost a thousand sleeping fibers -- each
-proc is ~512 bytes, no thread per connection.  When a connection
+proc reserves a fiber stack (64 KiB of address space by default, see
+`xtc_runtime_set_stack_size`, of which the kernel backs only the pages
+it touches), and no thread per connection.  When a connection
 becomes active, only its proc wakes; others stay asleep.  This is
 the xtc model in one screen of code.
 
@@ -390,10 +398,11 @@ By layer of complexity:
    deadlock detector.  Demonstrates a custom victim picker
    driven by a coroutine.
 5. `examples/05_rexis/` -- Redis-protocol-compatible server with
-   hard resource budgets.  ~2000 LOC; uses every major xtc layer.
-6. `examples/06_sqlxtc/` -- networked SQLite via the Quack
-   protocol.  Multi-client, embedded SQLite executor, all I/O
-   through xtc.
+   hard resource budgets.  About 4,800 LOC; uses every major xtc
+   layer.
+6. `examples/06_sqlxtc/` -- a from-scratch SQL engine (parser,
+   vectorized executor, B-link tree, buffer pool, WAL) served over
+   the Quack protocol.  Multi-client, all I/O through xtc.
 
 For specific topics:
 
@@ -409,10 +418,10 @@ For API reference:
 
 ## When you hit something missing
 
-xtc is pre-1.0.  Some things aren't there yet, some things are
-there but rough.  `docs/KNOWN_ISSUES.md` lists the known gaps;
-the rexis and sqlxtc examples each have a "Gaps in xtc" section
-documenting what they wished xtc had.
+Some things aren't there yet, some things are there but rough.
+`docs/KNOWN_ISSUES.md` lists the known gaps; the rexis example's
+README has a "Gaps in xtc" section documenting what it wished xtc
+had.
 
 Patches welcome.  Open issues at
 <https://codeberg.org/gregburd/libxtc/issues>.
@@ -422,5 +431,5 @@ Patches welcome.  Open issues at
 If you contribute back: BSD KNF as encoded in `.clang-format`.
 ASCII-only in source / docs / comments / commit messages.  Run
 `dist/s_async` and `dist/s_cfg` lints before committing.  Property
-tests via hegel-c are encouraged for any new primitive.  See
+tests via libhegel are encouraged for any new primitive.  See
 `AGENTS.md` for the full list of project conventions.
