@@ -134,7 +134,7 @@ The result says less than it seems to:
 
 With one server thread every server is about 100k ops/s here, against
 140-219k on the one-node 64-vCPU host of the earlier study (2026-10-22,
-libxtc 1.58 development). The cause is the
+libxtc 1.59 development, v1.58.0-91).  The cause is the
 socket crossing. With the load generator on node 0 instead (the
 server's own node), the same one-thread runs give:
 

@@ -76,8 +76,8 @@ parallel. SET/s with valkey-benchmark (`-c 200 --threads 8 -P 16`, 32 B,
 | SET/s | 0.78M | 1.14M | 1.75M | 2.53M | 3.20M | 3.50M |
 
 With one latch for the whole keyspace (an earlier build, on a 32-vCPU
-host, 2026-10), `--loops=4` gave 0.14M/s against one loop's 0.89M/s. Past 16
-loops every SET still takes its shard's write latch, and 16 more loops
+host, 2026-10), `--loops=4` gave 0.14M/s against one loop's 0.89M/s.  Past
+16 loops every SET still takes its shard's write latch, and 16 more loops
 buy 9%. The same client against DragonFly gives 0.38M, 0.72M, 1.36M,
 2.57M, 4.33M and 4.30M, and against Valkey at most 0.87M: rexis leads up
 to 4 threads, they are level at 8, and DragonFly leads by 35% at 16 and
@@ -95,7 +95,7 @@ so the per-loop client cap is a configured number (`--loop-clients`), and
 ONE loop held 100,000 idle connections (7.3 KB of RSS each, 5 CPU ticks
 per 10 s idle, PING answered) on one 32-vCPU host (2026-10-27, the 2.0
 development tree), where the 1.x build refused every client past
-65,520. A client over any limit gets Redis's
+65,520.  A client over any limit gets Redis's
 `-ERR max number of clients reached`.
 
 An idle connection must also cost nothing while it waits. Each connection
@@ -120,9 +120,9 @@ both were allocated at accept; 20,000 idle connections, `--loops=2`,
   The connection's teardown (close the socket, free both buffers, leave
   its pub/sub groups) is registered ONCE up front on an
   [`xtc_scope`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_scope.3):
-  it runs on *every* exit path -- a normal close and, crucially, an
-  asynchronous kill from the supervisor while the fiber is parked in
-  `xtc_proc_wait_fd`. That is the "mechanism, not manner" principle in
+  it runs on *every* exit path -- a normal close, an error and,
+  crucially, an asynchronous kill (`xtc_exit_pid`) while the fiber is
+  parked in `xtc_proc_wait_fd`.  That is the "mechanism, not manner" principle in
   practice: before the scope, a kill skipped the cleanup block and
   leaked the fd and buffers; the scope closes them no matter how the
   fiber leaves. See
