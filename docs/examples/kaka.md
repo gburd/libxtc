@@ -4,7 +4,7 @@ parent: Examples
 nav_order: 3
 permalink: /examples/kaka/
 lede: >-
-  A partitioned, append-only log broker modelled on Kafka -- with TCP backpressure and a lock-free offset coordinator.
+  A partitioned, append-only log broker modelled on Kafka, with TCP backpressure and a lock-free offset coordinator.
 ---
 
 1. TOC
@@ -62,7 +62,7 @@ expressed with lightweight processes instead of OS threads.
 
 ## How it works
 
-- **`main.c`** -- the listener: `xtc_net_accept`, parking on the socket
+- **`main.c`**: the listener, `xtc_net_accept`, parking on the socket
   when there is nothing to accept and backing off 10 ms when the process
   is out of descriptors (the broker keeps running and
   serves again once fds free up). SIGTERM/SIGINT stop accepting and
@@ -137,7 +137,7 @@ to 0.47 s, and a PRODUCE to another topic issued during it went from
   has no lock at all.
 - **Backpressure.** A connection proc parks on its partition's reply
   and does not read its socket meanwhile, so TCP carries the
-  backpressure to the producer -- flow control with no condition
+  backpressure to the producer: flow control with no condition
   variables.
 
 ## Advantages of building it on libxtc

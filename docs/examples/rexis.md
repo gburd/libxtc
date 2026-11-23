@@ -113,7 +113,7 @@ both were allocated at accept; 20,000 idle connections, `--loops=2`,
 ## How it works
 
 - **`main.c`** stands up an `xtc_app` with a supervised TCP listener.
-- **`conn.c`** -- the listener (in `main.c`) accepts a socket and spawns
+- **`conn.c`**: the listener (in `main.c`) accepts a socket and spawns
   one connection process per client (`xtc_proc_spawn`). The process loops:
   read from the socket (parking the fiber via the reactor when the
   socket is not ready), parse a RESP command, apply it, write the reply.
@@ -203,7 +203,7 @@ both were allocated at accept; 20,000 idle connections, `--loops=2`,
   connection processes see the keyspace. The example keeps this simple
   (one table on one loop; 64 shards, each behind a reader/writer latch,
   with `--loops`) rather than pretending it solved shard-per-thread
-  ownership -- see the code for exactly where the line is drawn, and
+  ownership; see the code for exactly where the line is drawn, and
   [rexis vs DragonFly and Valkey]({{ '/examples/rexis-vs-dragonfly/' | relative_url }})
   for the shard-per-loop design that would take it to many cores.
 - **A table that does not grow is a time bomb.** Until 2026-10 the
