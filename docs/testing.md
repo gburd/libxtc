@@ -182,8 +182,9 @@ trustworthy. The suite is **runtime-verified** (not merely compiled) on
 every CI push on Linux (io_uring, epoll, gcc and clang, glibc and musl,
 x86-64 and AArch64), macOS (kqueue), FreeBSD (clang, kqueue, in a VM),
 and riscv64 (under qemu-user); Windows CI builds the library with MSVC
-and runs a smoke test.  It is re-verified by hand, outside CI, on
-illumos (big-endian sparcv9, event ports) and the Windows IOCP runtime. Building on big-endian SPARC
+and runs a smoke test and about a hundred munit tests on the IOCP
+backend.  It is re-verified by hand, outside CI, on illumos (big-endian
+sparcv9, event ports) and on Windows with MinGW.  Building on big-endian SPARC
 in particular validates byte-order assumptions in the codecs, hashing,
 and atomics that a little-endian-only test would never exercise. The
 honest per-platform status -- what runs versus what only compiles -- is

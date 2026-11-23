@@ -65,8 +65,8 @@ start with libxtc, it's exqusite!"** -everyone who uses it.
   Linux is exercised on every commit by CI (gcc and clang, plus
   AddressSanitizer, UBSan, and the forced-fcontext substrate that
   musl uses), as are macOS (Apple Silicon, the kqueue backend +
-  fcontext substrate, full C munit suite) and Windows/MSVC (xtc.lib +
-  smoke test).  FreeBSD 15 (clang, kqueue) was re-verified against the
+  fcontext substrate, full C munit suite) and Windows/MSVC (xtc.lib,
+  a smoke test, and a munit subset on IOCP).  FreeBSD 15 (clang, kqueue) was re-verified against the
   current tree (full gmake check passes, including the native kqueue
   file-AIO path).  illumos (SunOS 5.11, UltraSPARC v9 / big-endian
   sparcv9, gcc, the event-ports backend) was re-verified against the
@@ -75,7 +75,8 @@ start with libxtc, it's exqusite!"** -everyone who uses it.
   with all three of MinGW, Clang64, and MSVC.  The IOCP runtime (AFD
   socket poll, cross-thread wakeup, file AIO) was runtime-verified on a
   Windows host with MinGW (loop/task/timer/waker/net + file-AIO); the
-  per-commit Windows CI remains an MSVC xtc.lib + smoke build.  macOS
+  per-commit Windows CI builds xtc.lib with MSVC and runs a smoke test
+  and about a hundred munit tests on IOCP.  macOS
   has an OS-layer port.  (An AIX/ppc64 OS-layer port exists in-tree and
   compiles, but AIX is NOT a supported or maintained target -- it is
   unverified and off the roadmap; see docs/KNOWN_ISSUES.md.)  See
@@ -258,7 +259,7 @@ What's working today:
 | Layer | Status |
 |---|---|
 | L0 OS substrate | Linux, FreeBSD, illumos runtime-verified; Windows (MinGW/Clang64/MSVC) and macOS OS-layer ports build.  (An AIX/ppc64 OS-layer port compiles in-tree but AIX is NOT supported/maintained -- unverified, off the roadmap.) |
-| L1 I/O | io_uring, epoll, kqueue, poll, select, and illumos event-ports (port_*) runtime-verified (the last on big-endian sparcv9, including its native SIGEV_PORT file-AIO path).  IOCP (Windows) runtime-verified on a host with MinGW (loop/task/timer/wakeup/socket-poll/file-AIO); AIX pollset COMPILES and is code-reviewed but not yet runtime-verified.  Per-commit CI runs Linux, macOS, FreeBSD, and riscv64 at runtime; Windows CI is a build-only smoke. |
+| L1 I/O | io_uring, epoll, kqueue, poll, select, and illumos event-ports (port_*) runtime-verified (the last on big-endian sparcv9, including its native SIGEV_PORT file-AIO path).  IOCP (Windows) runtime-verified on a host with MinGW (loop/task/timer/wakeup/socket-poll/file-AIO); AIX pollset COMPILES and is code-reviewed but not yet runtime-verified.  Per-commit CI runs Linux, macOS, FreeBSD, and riscv64 at runtime; Windows CI runs an MSVC smoke test and a munit subset on IOCP. |
 | L2 event runtime | Done.  Single + multi-loop, work stealing, hand-written `fcontext` asm for 7 CPU families (x86_64, aarch64, arm, ppc64le, riscv64, s390x, sparc64; 10 `.S` + 2 MASM variants covering the SysV / MS-PE / Mach-O ABIs) + ucontext fallback + Win32 fibers.  The bare `__xtc_jump_fcontext` swap is ~4.4 ns on x86_64; a full `xtc_yield` -- the consumer-visible cost, including run-queue turn and per-fiber TLS -- measures ~93 ns/op in `bench_micro` (both on a two-socket x86-64 host, libxtc 2.1.1-37). |
 | L3 primitives | Done.  Channels, processes, sync, RCU, lwlock, lrlock, lockmgr, slab, resource caps, observability. |
 | L4 orchestration | Done.  Supervisors (4 strategies), gen_server, registry, app bringup, hierarchical mctx. |
@@ -296,8 +297,8 @@ tier, the five TLS backends, the examples, **macOS** (Apple Silicon:
 kqueue + fcontext + GCD dispatch semaphores, full C munit suite),
 **FreeBSD** in a VM (clang + kqueue, `gmake check` -- this job gates
 again since the 1.48.0 strand fix), **riscv64** under qemu-user (C +
-property suites), and an **MSVC** `xtc.lib` + smoke build on
-**Windows**.  The property tier has its own job, and it gates the
+property suites), and an **MSVC** `xtc.lib` build on **Windows**
+that runs a smoke test and a munit subset on IOCP.  The property tier has its own job, and it gates the
 workflow.
 
 NOT in per-commit CI, and therefore verified by hand against this tree
