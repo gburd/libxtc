@@ -16,12 +16,21 @@
 #      it to HEAD's library; run it.  Static first, then the same object
 #      against HEAD's libxtc.so (the dynamic-link swap a packager does).
 #
-# BASE_TAG defaults to the newest v2.* release tag OLDER than HEAD's
-# version.  Until a 2.x tag exists there is nothing to be compatible
-# WITH: 1.x -> 2.0 is the major break (structs gained a size field, the
-# symbols a version node), so the job SKIPS (exit 0, says why).  The
-# lead wires the first real base once v2.0.0 is tagged; nothing here
-# changes then.
+# BASE_TAG defaults to the previous release of THIS tree's release line
+# (docs/abi-stability.md, "Long-term support and release lines"):
+#   - a development tree (dist/release.in names a CalVer release) takes
+#     the newest CalVer tag vYYYY.MM.DD[.N] older than its own name, or
+#     v2.2.0, the last SemVer release cut from main, when there is none;
+#   - an LTS tree (no dist/release.in, so named by its ABI level) takes
+#     the newest SemVer tag v2.MINOR.N older than its ABI level with the
+#     SAME minor (2.1.5 for 2.1.6).  A different minor is another line: a
+#     newer one (2.2.0 seen from lts/2.1) may use API this tree lacks,
+#     and an older one is not the N-1 of this line.  Only when the line
+#     has no earlier release (an untagged main at 2.3.0, a new LTS's
+#     first patch) does it fall back to the newest older v2.* tag.
+# Until a 2.x tag exists there is nothing to be compatible WITH: 1.x ->
+# 2.0 is the major break (structs gained a size field, the symbols a
+# version node), so the job SKIPS (exit 0, says why).
 #
 # Exit 0 pass or skip, 1 the consumer failed against HEAD, 2 setup error.
 # env: CC (default cc), JOBS, COMPAT_OUT (work dir, default a temp dir),
@@ -34,19 +43,43 @@ src=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$src"
 CC=${CC:-cc}
 JOBS=${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}
-head_ver=$(cat dist/version.in)
+head_ver=$(sh dist/release_name.sh dist)
+head_abi=$(tr -d '[:space:]' < dist/version.in)
+
+# newest_semver_below VERSION [MINOR]: the newest tag vMAJOR.MINOR.PATCH
+# older than VERSION, restricted to minor MINOR when given.
+newest_semver_below() {
+	git tag -l 'v2.*' --sort=-v:refname 2>/dev/null |
+	    awk -v h="$1" -v m="${2:-}" -F'[v.]' '
+		BEGIN { split(h, hv, "."); hk = hv[1] * 1000000 + hv[2] * 1000 + hv[3] }
+		/^v[0-9]+\.[0-9]+\.[0-9]+$/ {
+			if (m != "" && $3 != m) next
+			if ($2 * 1000000 + $3 * 1000 + $4 < hk) { print; exit }
+		}' || true
+}
 
 base=${1:-}
+if [ -z "$base" ] && [ "$head_ver" != "$head_abi" ]; then
+	# A development release.  CalVer names sort as versions, and any tag
+	# sorting below HEAD's own name is an earlier development release.
+	base=$(git tag -l 'v20[0-9][0-9].*' --sort=-v:refname 2>/dev/null |
+	    grep -E '^v20[0-9]{2}\.[0-9]{2}\.[0-9]{2}(\.[0-9]+)?$' |
+	    while read -r t; do
+		if [ "$t" != "v$head_ver" ] &&
+		    [ "$(printf '%s\n%s\n' "$t" "v$head_ver" | sort -V | head -1)" = "$t" ]; then
+			echo "$t"
+			break
+		fi
+	    done)
+	if [ -z "$base" ] && git rev-parse --verify -q "v2.2.0^{commit}" >/dev/null; then
+		base=v2.2.0
+	fi
+fi
 if [ -z "$base" ]; then
-	# The newest older release: a newer tag (2.2.0 seen from the 2.1
-	# LTS branch) is not N-1, and its consumer may use API this tree
-	# does not have.
-	base=$(git tag -l 'v2.*' --sort=-v:refname 2>/dev/null |
-	    awk -v h="$head_ver" -F'[v.]' '
-		BEGIN { n = split(h, hv, "."); hk = hv[1] * 1000000 + hv[2] * 1000 + hv[3] }
-		/^v[0-9]+\.[0-9]+\.[0-9]+$/ {
-			if ($2 * 1000000 + $3 * 1000 + $4 < hk) { print; exit }
-		}' || true)
+	base=$(newest_semver_below "$head_abi" "$(echo "$head_abi" | cut -d. -f2)")
+fi
+if [ -z "$base" ]; then
+	base=$(newest_semver_below "$head_abi")
 fi
 if [ -z "$base" ]; then
 	echo "compat-check: SKIP: no 2.x release tag yet (HEAD is $head_ver)."
@@ -60,7 +93,7 @@ if ! git rev-parse --verify -q "$base^{commit}" >/dev/null; then
 	exit 2
 fi
 case "$base" in
-v2.*|v3.*) ;;
+v2.*|v3.*|v20[0-9][0-9].*) ;;
 *)
 	if [ "${COMPAT_FORCE:-0}" != 1 ]; then
 		echo "compat-check: SKIP: $base is not a 2.x release; a 1.x consumer is not"
