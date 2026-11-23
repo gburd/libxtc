@@ -144,11 +144,15 @@ main(void)
 }
 ```
 
-Compile and run:
+Compile against the installed library and run:
 ```sh
-cc my.c -lxtc -lpthread -o my && ./my
+cc my.c $(pkg-config --cflags --libs --static xtc) -o my && ./my
 got 5 bytes from worker
 ```
+
+`pkg-config --static` adds the libraries libxtc.a was built against
+(liburing, the TLS backend); a bare `-lxtc -lpthread` fails to link when
+the build found either.
 
 That's a one-process actor system in about 50 lines.  Note the shape:
 `xtc_self()` and `xtc_recv()` are **proc-context** calls -- off a proc
@@ -191,7 +195,7 @@ here as the git submodule `examples/`: clone with `--recurse-submodules`
 | `06_sqlxtc/` | A from-scratch SQL engine (parser, vectorized executor, B-link + buffer pool + WAL) | CI (in-process tests, differential oracle vs sqlite3) |
 | `07_kaka/` | Kafka-shaped partitioned log broker with credit backpressure | CI (in-process tests) |
 | `08_tnt/` | The Isolate layer: thread-per-core stackless state machines, TCP echo | `make check` (built, `--help` lint) |
-| `09_pgmock/` | A mock PostgreSQL backend on the xtc scheduler -- zero PG source | CI (built, `--help` lint only -- not run) |
+| `09_pgmock/` | A mock PostgreSQL backend on the xtc scheduler -- zero PG source | `make check` (`test_pgmock_smoke` drives it in-process); CI `--help` lint |
 | `10_circuit_breaker.c` | The circuit-breaker pattern as an `xtc_fsm` (gen_statem) | `make check` (runs, asserts) |
 | `11_lorb/` | A price-time limit order book / matching engine, with benchmarks | CI (in-process tests) |
 | `12_continuous_batching/` | Continuous batching: requests join and leave a vector between iterations (needs `--enable-sched-policy`) | `make check` in an enabled build (runs, asserts) |
@@ -224,9 +228,9 @@ the *what*.
 
 ## Status and stability
 
-xtc is **1.0**.  The public API surface is stable in the sense that no
-documented `xtc_*` function has been removed, renamed, or had its
-signature changed during 1.x.
+xtc is at **2.3**.  The compatibility promise for 2.x is in
+`docs/abi-stability.md`; the names renamed in 2.2 keep working as
+deprecated aliases until 3.0 (`docs/deprecations.md`).
 
 **Binary compatibility, from 2.0.**  Every caller-allocated option,
 info and stats struct starts with a `size_t size` the caller sets
@@ -247,25 +251,26 @@ What's working today:
 |---|---|
 | L0 OS substrate | Linux, FreeBSD, illumos runtime-verified; Windows (MinGW/Clang64/MSVC) and macOS OS-layer ports build.  (An AIX/ppc64 OS-layer port compiles in-tree but AIX is NOT supported/maintained -- unverified, off the roadmap.) |
 | L1 I/O | io_uring, epoll, kqueue, poll, select, and illumos event-ports (port_*) runtime-verified (the last on big-endian sparcv9, including its native SIGEV_PORT file-AIO path).  IOCP (Windows) runtime-verified on a host with MinGW (loop/task/timer/wakeup/socket-poll/file-AIO); AIX pollset COMPILES and is code-reviewed but not yet runtime-verified.  Per-commit CI runs Linux, macOS, FreeBSD, and riscv64 at runtime; Windows CI is a build-only smoke. |
-| L2 event runtime | Done.  Single + multi-loop, work stealing, hand-written `fcontext` asm for 7 CPU families (x86_64, aarch64, arm, ppc64le, riscv64, s390x, sparc64; 12 `.S` + 2 MASM variants covering the SysV / MS-PE / Mach-O ABIs) + ucontext fallback + Win32 fibers.  The bare `__xtc_jump_fcontext` swap is ~4.4 ns on x86_64; a full `xtc_yield` -- the consumer-visible cost, including run-queue turn and per-fiber TLS -- measures ~93 ns/op in `bench_micro` (both on an Ice Lake host, libxtc 2.1.1-37). |
+| L2 event runtime | Done.  Single + multi-loop, work stealing, hand-written `fcontext` asm for 7 CPU families (x86_64, aarch64, arm, ppc64le, riscv64, s390x, sparc64; 10 `.S` + 2 MASM variants covering the SysV / MS-PE / Mach-O ABIs) + ucontext fallback + Win32 fibers.  The bare `__xtc_jump_fcontext` swap is ~4.4 ns on x86_64; a full `xtc_yield` -- the consumer-visible cost, including run-queue turn and per-fiber TLS -- measures ~93 ns/op in `bench_micro` (both on a two-socket x86-64 host, libxtc 2.1.1-37). |
 | L3 primitives | Done.  Channels, processes, sync, RCU, lwlock, lrlock, lockmgr, slab, resource caps, observability. |
 | L4 orchestration | Done.  Supervisors (4 strategies), gen_server, registry, app bringup, hierarchical mctx. |
 | Process groups | Done.  `xtc_pg` (Erlang `:pg`): named, single-node pid groups with join/leave/broadcast; tested in `test/m10/test_pg.c` and under DST.  Cross-node groups await the unbuilt distributed module. |
 | TLS | OpenSSL, GnuTLS, wolfSSL, Mbed TLS, and BoringSSL backends build and pass the m18 suite in CI (`docs/tls-matrix.md`); SChannel (Windows) is compile-only.  Since 1.50 a CLIENT verifies the server certificate AND host name by default on the four non-Windows backends, a write to a dead peer is an error rather than a process-killing `SIGPIPE`, and a zeroed `xtc_tls_opts_t` is secure.  SChannel applies the same verify default since 1.51 but does not yet check the host name. |
 
-Test coverage today, measured against this tree (v1.49.1 plus the
-allocator / cancellation / accounting regression tests that landed after
-it): **644 munit test cases across 109 munit binaries on Linux**, of
-which 2 skip here (a macOS-only preemption-timer case and one slab
-pressure case), clean under AddressSanitizer and UBSan in CI, plus 34
-shell gates, 7 standalone C harnesses, the 68-file
-deterministic-simulation tier (a separate `--with-io-backend=sim` build,
-`make check-dst`), and **36 hegel properties across 17 suites** that all
-pass when the tier is enabled with `--with-hegel`.  Recount rather than
-trust these numbers if you are citing them: a full `make tests-c` run of
-this tree reports 642 successful + 2 skipped, and
+Test coverage today, measured against the 2.3.0 tree on Linux
+(2026-11-22, examples submodule checked out): **989 munit test cases
+across 126 munit binaries**, of which 3 skipped on the measuring host (a
+macOS-only preemption-timer case and two kernel-TLS cases the kernel
+declined), clean under AddressSanitizer and UBSan in CI, plus 19
+standalone C harnesses (145 C tests in all), 47 shell gates, the
+92-test deterministic-simulation tier (a separate
+`--with-io-backend=sim` build, `make check-dst`), and **39 hegel
+properties across 18 suites** that all pass when the tier is enabled
+with `--with-hegel` (3 of them, `pbt_qsel`, need the examples).
+Recount rather than trust these numbers if you are citing them:
 `for t in $(...TESTS_C...); do ./$t --list; done | grep -c '^/'` gives
-the same 644.
+the munit count, and `make tests-pbt` in a `--with-hegel` build prints
+one OK line per property.
 
 The property tier is opt-in because it needs `libhegel`
 ([hegeldev/hegel-rust](https://github.com/hegeldev/hegel-rust)), an
@@ -275,7 +280,8 @@ Without it, `make check` prints a loud per-suite SKIP and a count of
 unverified properties rather than passing silently -- a green run without
 `--with-hegel` does NOT mean those properties hold.  See
 [ADR-0002](docs/adr/0002-hegel-pbt-first-class.md).
-GitHub CI runs, on every push and pull request: gcc and clang `make
+GitHub CI runs, on every push to `main` or `lts/2.1` and on every pull
+request: gcc and clang `make
 check`, AddressSanitizer, UndefinedBehaviorSanitizer, ThreadSanitizer,
 Valgrind, a forced-fcontext (musl coroutine path) build, the DST sim
 tier, the five TLS backends, the examples, **macOS** (Apple Silicon:
@@ -283,9 +289,8 @@ kqueue + fcontext + GCD dispatch semaphores, full C munit suite),
 **FreeBSD** in a VM (clang + kqueue, `gmake check` -- this job gates
 again since the 1.48.0 strand fix), **riscv64** under qemu-user (C +
 property suites), and an **MSVC** `xtc.lib` + smoke build on
-**Windows**.  The property tier's own job is advisory
-(`continue-on-error`) pending a runner-specific failure; see
-KNOWN_ISSUES.
+**Windows**.  The property tier has its own job, and it gates the
+workflow.
 
 NOT in per-commit CI, and therefore verified by hand against this tree
 rather than continuously: illumos (SunOS 5.11, UltraSPARC v9 /
@@ -354,16 +359,16 @@ The meson build (`meson.build` + `meson_options.txt`) is at parity with
 the autotools build: it compiles the full static (and, with
 `-Dshared=true`, shared) library from the same source list, with the
 same io-backend / coroutine / TLS selection, and `meson test` registers
-111 of the same C test binaries (measured: `meson test --list | wc -l`)
-against `make check`'s 118-entry C tier.  The exported
+127 of the same C test binaries (measured: `meson test --list | wc -l`)
+against `make check`'s 144-entry C tier.  The exported
 `xtc_*` / `__xtc_*` symbol set is identical to the autotools
-`libxtc.a` at the same optimization level (verified for this release:
-885 defined symbols each, zero difference).  Its options mirror
+`libxtc.a` at the same optimization level (measured 2026-11-22 with
+`nm -g --defined-only`: 1029 defined symbols each, zero difference).  Its options mirror
 the `./configure` flags:  `-Dio-backend=` (auto/poll/epoll/uring/kqueue/
 iocp/solaris/aix/select/sim), `-Dtls=` (auto/openssl/libressl/boringssl/
 mbedtls/gnutls/wolfssl/schannel/none), `-Daccel=` (auto/yes/no),
-`-Dliburing=PATH`, `-Dshared=`, `-Ddiagnostic=`, and `-Ddtrace=`
-(no/auto/yes/sdt).  configure.ac /
+`-Dliburing=PATH`, `-Dshared=`, `-Ddiagnostic=`, `-Dsched_policy=`,
+and `-Ddtrace=` (no/auto/yes/sdt).  configure.ac /
 dist/Makefile.in remain the reference for WHAT is built; meson tracks
 them.  Not yet wired here: the shell-gate tests (`TESTS_SH`), the
 property-based tier (`TESTS_PBT`, needs `--with-hegel`), and the
@@ -373,7 +378,7 @@ follow-up).
 
 ## Documentation
 
-* `examples/` -- start here.  Five working programs from "hello async" to "Redis-compat server with budgets".
+* `examples/` -- start here.  Working programs from "hello async" to "Redis-compat server with budgets".
 * `docs/getting-started.md` -- step-by-step beginner walkthrough, from "just cloned" to an async TCP server.
 * `man/man3/` and `man/man7/` -- per-API reference.  Every public `xtc_*` symbol has a man page (coverage is gate-enforced in `make check`).
 * `PLAN.md` -- the full design rationale.  Long but exhaustive.
@@ -396,7 +401,7 @@ encoded in `.clang-format` (CI checks the lines a change touches, not
 the whole tree).  All contributions must be ASCII-only in source,
 docs, comments, and commit messages.  Run `dist/s_async` and
 `dist/s_cfg` lints before submitting.  Property-based tests
-(via hegel-c) are encouraged for any new primitive.
+(via libhegel) are encouraged for any new primitive.
 
 ## Inspiration
 
