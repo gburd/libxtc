@@ -16,6 +16,11 @@
 #
 # Env: XTC_BUILD_DIR (the build tree holding libxtc.a; default .).
 set -u
+# sort and comm must agree on collation.  In a UTF-8 locale uutils
+# coreutils sorts by locale but comm checks bytes, so comm calls the
+# input unsorted and lists defined symbols as missing.
+LC_ALL=C
+export LC_ALL
 B=${XTC_BUILD_DIR:-.}
 A=$B/libxtc.a
 NM=${NM:-nm}
