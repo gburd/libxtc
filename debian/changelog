@@ -55,6 +55,12 @@ libxtc (2.3.0-1) unstable; urgency=medium
       New test test_uniq_long, DST test test_sim_sqlxtc_uniq, planted
       bugs 72 and 73.  The nested-loop join no longer reads one element
       before its order array when it ends.
+    - xtc_lockmgr: a custom victim picker (XTC_LOCK_VICTIM_CUSTOM) was
+      handed the detector's internal node indices (0, 1, ...) instead of
+      the locker IDs its contract names; the victim chosen was right,
+      but a picker that chose, looked up or logged by ID got the wrong
+      ones.  It now gets the IDs.  No API, symbol or layout change.  New
+      test /m13/lockmgr/victim_cycle.
   * Tests: test_sync's off-loop spin, notify-spin and no-herd tests count
     the lock's own condvar sleeps and wakeups instead of OS context
     switches; test_exec's Ex5 and test_sup's group-restart hook tests
