@@ -93,9 +93,18 @@ libxtc (2.3.0-1) unstable; urgency=medium
   * Build and portability: the illumos gates use POSIX grep and nm
     formats (test_docs_abi, test_api_reach); no -Wclobbered warning on
     illumos (coro_uctx.c); the Windows build_msvc.bat gate fails when
-    smoke.exe fails; compat-check.sh takes the newest older release as
-    N-1.
+    smoke.exe fails; compat-check.sh takes the previous release of the
+    tree's own line as N-1: the previous development release (or
+    v2.2.0) on main, the previous 2.1.N on the LTS.
   * Docs: the correct two-message join, as a tested snippet.
+  * Release scheme: development releases from main are named by date
+    (vYYYY.MM.DD) and published as pre-releases; this ABI level, 2.3.0,
+    ships first as one.  dist/version.in keeps the ABI level (the
+    XTC_VERSION_MAJOR/_MINOR/_PATCH macros, xtc_version_components, the
+    SONAME libxtc.so.2 and the file libxtc.so.2.3.0), and a release's
+    dist/release.in gives its name to XTC_VERSION_STRING,
+    xtc_version_string and pkg-config's Version.  No .deb or .rpm is
+    built for a development release.
 
  -- Greg Burd <greg@burd.me>  Fri, 20 Nov 2026 09:00:00 -0500
 

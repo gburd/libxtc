@@ -95,7 +95,9 @@ make check
   Windows too; sqlxtc indexes keys of any length (index format 2 to 3);
   illumos gate portability; the Windows gate fails on a smoke failure.
   scripts/coverage.sh reports the DST-reachable surface (88.0% line,
-  70.1% branch, 97.0% function).
+  70.1% branch, 97.0% function).  This ABI level ships first as a
+  development release from main (CalVer vYYYY.MM.DD, a pre-release);
+  no RPM is built for a development release.
 
 * Tue Nov 17 2026 Greg Burd <greg@burd.me> - 2.2.0-1
 - MINOR on 2.x; SONAME libxtc.so.2.  2.1.2's 761 functions stay at
