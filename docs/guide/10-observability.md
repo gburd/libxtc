@@ -24,7 +24,7 @@ microscope for Tokio, and it **produces traces the dial9 GUI viewer opens
 unchanged**. You get a battle-tested visual timeline for free; libxtc's job is
 to emit the events in dial9's wire format.
 
-Compared to [`xtc_stats`]({{ '/reference/api-index/' | relative_url }})
+Compared to [`xtc_stats`]({{ '/reference/api/xtc_stats/' | relative_url }})
 (aggregate counters, for dashboards) and `xtc_trace` (the causal message
 trace), `xtc_tail` is the event-level tool: `xtc_stats` says the p99 poll time
 regressed; `xtc_tail` shows you the exact fiber, on the exact worker, that sat
@@ -36,6 +36,7 @@ off-CPU and why.
 disabled, so it is safe to compile into a production binary. Turn it on in
 code:
 
+<!-- fragment -->
 ```c
 xtc_tail_enable(XTC_TAIL_SCHED);   /* record scheduler events */
 ```
@@ -43,6 +44,7 @@ xtc_tail_enable(XTC_TAIL_SCHED);   /* record scheduler events */
 or, for a deployed binary you do not want to rebuild, from the environment at
 startup:
 
+<!-- fragment -->
 ```c
 xtc_tail_from_env();   /* honors XTC_TAIL_ENABLE */
 ```
@@ -61,6 +63,7 @@ the mask it enabled (0 when off), so you can log whether tracing is live.
 The ring lives in memory. To analyze it you write it out in the dial9 format.
 For a one-shot capture (a test, a repro, a shutdown hook):
 
+<!-- fragment -->
 ```c
 int fd = open("/tmp/traces/app.d9", O_WRONLY | O_CREAT | O_TRUNC, 0600);
 xtc_tail_dump_dial9(fd);
@@ -70,6 +73,7 @@ close(fd);
 For a deployed service, spill a **segment** into a directory that a sidecar or
 `scp` ships to wherever you run the viewer:
 
+<!-- fragment -->
 ```c
 xtc_tail_spill_dial9("/var/lib/xtc-traces");
 /* writes /var/lib/xtc-traces/xtc-tail-<pid>-<ns>.d9 */
@@ -145,7 +149,7 @@ short.
 Where `xtc_tail` records individual events, `xtc_stats` aggregates them:
 counters, gauges, and histograms you register once and update on the hot path,
 then read back for a dashboard or a Prometheus scrape. See
-[`xtc_stats(3)`]({{ '/reference/api-index/' | relative_url }}) for the full
+[`xtc_stats(3)`]({{ '/reference/api/xtc_stats/' | relative_url }}) for the full
 API.
 
 This section is the honest counterpart to the API reference: it says what
@@ -307,5 +311,5 @@ of reading a missing argument off the stack.
 Both calls share one record path: the same level floor, ring, sink and drop
 count. `xtc_logf` writes to the default logger, `xtc_logf_to(log, ...)` to a
 given one. The macros are C only: a C++ file that includes `xtc_log.h` gets
-`xtc_log_write` but not `xtc_logf`. See [`xtc_log(3)`]({{ '/reference/api-index/' | relative_url }})
+`xtc_log_write` but not `xtc_logf`.  See [`xtc_log(3)`]({{ '/reference/api/xtc_log/' | relative_url }})
 for the full list of argument types and specs.

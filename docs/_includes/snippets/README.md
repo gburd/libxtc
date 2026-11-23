@@ -18,6 +18,15 @@ Conventions
   the interesting lines while the file still compiles and runs as a
   whole.  (The Jekyll include pulls the region; the test builds the
   whole file.)
+- A snippet whose output a page shows has that output in NN_topic.out
+  beside it.  The gate runs the snippet and diffs what it prints
+  against the file; a page shows the file with
+  `{% include output.html file="NN_topic.out" %}`.
+- Pages include, they do not paste.  The gate fails on a ```c block in
+  docs/ or README.md unless the line above it is `<!-- fragment -->` or
+  `<!-- snippet: NN_topic.c -->` (a copy of the file's "full" region,
+  for README.md and docs/getting-started.md, which forges render as
+  plain Markdown).
 - Snippets use ONLY the public xtc_* API (same rule as examples/): the
   api-discipline gate does not scan here, but the book must model good
   consumer code, so keep it clean by hand.

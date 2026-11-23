@@ -1,0 +1,2 @@
+coroutine: computing 7 * 7
+result = 49

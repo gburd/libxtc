@@ -349,6 +349,7 @@ in-place layout change.
 
 `XTC_DEPRECATED(msg)` (`src/inc/xtc_export.h`) marks a declaration:
 
+<!-- fragment -->
 ```c
 XTC_DEPRECATED("use xtc_foo_ex") XTC_API int xtc_foo(int);
 ```

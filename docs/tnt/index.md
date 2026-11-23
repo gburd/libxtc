@@ -173,9 +173,10 @@ All functions are in
   [`xtc_tnt_shard_id`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_tnt.3),
   [`xtc_tnt_scratch_arena`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_tnt.3).
 
-A handler returns a `xtc_tnt_transition_t`: `WAIT_IO`, `WAIT_MESSAGE`,
-`DONE`, or a crash transition (let it crash; the slot and handle are
-reclaimed).
+A handler returns a `xtc_tnt_transition_t` whose kind is
+`XTC_TNT_WAIT_IO`, `XTC_TNT_WAIT_MESSAGE`, `XTC_TNT_YIELD` (run again
+next tick), `XTC_TNT_DONE`, or `XTC_TNT_CRASH` (let it crash; the slot
+is reclaimed and its generation bumped, so old handles go stale).
 
 ## The example
 

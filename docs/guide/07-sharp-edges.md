@@ -34,6 +34,7 @@ that lock, so the pointer it hands back cannot be pulled out from under you
 by another thread's `xtc_env_set`. The pointer is valid until the next
 `xtc_env_get` **on the same thread**; copy it if you need to keep it.
 
+<!-- fragment -->
 ```c
 if (xtc_env_set("XTC_DEMO", "on", /*overwrite=*/1) != XTC_OK)
         /* handle XTC_E_INVAL / XTC_E_NOMEM */;
@@ -55,6 +56,7 @@ so distinct threads get distinct default streams. Under the deterministic
 simulator an un-seeded thread draws from the run's own stream instead, so
 the same seed replays the same values there too.
 
+<!-- fragment -->
 ```c
 xtc_rand_seed(42);
 uint64_t x = xtc_rand_u64();   /* reproducible from seed 42 */
@@ -62,10 +64,6 @@ uint64_t x = xtc_rand_u64();   /* reproducible from seed 42 */
 
 It is **not** a cryptographic generator -- do not use it for keys or
 security tokens.
-
-> A future release may hook this into the deterministic-simulation clock
-> (DST) so a replayed run draws a reproducible sequence; today it is simply
-> a clean, thread-safe, seedable source.
 
 ## 3. `strncpy` does not NUL-terminate
 
@@ -78,6 +76,7 @@ the buffer size -- another classic overflow.
 NUL-terminate when `dstsize > 0`, and they return the total length they
 *tried* to create. A return value `>= dstsize` is the truncation signal.
 
+<!-- fragment -->
 ```c
 char buf[8];
 if (xtc_strlcpy(buf, "verylongvalue", sizeof buf) >= sizeof buf)
@@ -91,4 +90,4 @@ so it is guaranteed to build against the current API:
 
 {% include snippet.html file="05_sharp_edges.c" region="full" %}
 
-See [`xtc_env(3)`](../../man/) for the full contract of each function.
+See [`xtc_env(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_env.3) for the full contract of each function.

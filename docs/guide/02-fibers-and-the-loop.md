@@ -28,19 +28,22 @@ back, and the function continues on the next line as if nothing
 happened.
 
 That switch is a few dozen instructions (a register save/restore written
-in per-architecture assembly, or `ucontext` where assembly is not
-available) -- no kernel involvement. Compare a thread context switch,
+in per-architecture assembly) -- no kernel involvement.  The portable
+`ucontext` substrate, which some targets use instead, adds a signal-mask
+system call to each switch.  Compare a thread context switch,
 which traps into the scheduler. This is why one loop on one thread can
 interleave hundreds of thousands of fibers.
 
 {: .rationale }
 > **Why hand-written `fcontext` assembly?** The switch is the hottest
 > path in the whole library. The x86-64 System V switch measures about
-> 4.4 ns (on an Ice Lake host). `ucontext` (the portable fallback) also
-> saves the signal mask with a syscall on every switch -- roughly an order of magnitude
-> slower. libxtc ships assembly for x86-64, AArch64, ppc64le, riscv64,
-> arm, s390x, and sparc64, and falls back to `ucontext` (and Win32
-> fibers on Windows) only where it must. See
+> 4.4 ns (on a two-socket x86-64 host).  `ucontext` (the portable
+> substrate) also saves the signal mask with a syscall on every switch --
+> roughly an order of magnitude slower. libxtc ships assembly for x86-64,
+> AArch64, ppc64le, riscv64, arm, s390x, and sparc64.  A build uses it by
+> default on Linux x86-64 and AArch64 with glibc, on Apple Silicon, and
+> on musl; other targets default to `ucontext` (`--with-coro=fctx`
+> selects the assembly), and Windows uses Win32 fibers.  See
 > [Architecture]({{ '/reference/architecture/' | relative_url }}) for the substrate matrix.
 
 ## The loop's job
@@ -113,9 +116,10 @@ library never notices.
 
 {% include snippet.html file="06_qsort_yield.c" region="full" %}
 
-```
-sorted correctly through 20 in-qsort yields: yes
-```
+{% include output.html file="06_qsort_yield.out" %}
+
+(The count is the number of comparisons your libc's `qsort` makes on
+these eight values; 17 is glibc's.)
 
 {: .rationale }
 > **Why this needs a stackful fiber.** When the comparator yields,

@@ -53,17 +53,20 @@ result back.
 
 {% include snippet.html file="01_hello_async.c" region="full" %}
 
-Build and run it against the static library you just made:
+Save it as `first.c`, then build and run it against the library you
+just installed:
 
 ```sh
-cc -I libxtc/src/inc first.c libxtc/build/libxtc.a -lpthread -lm -o first
+cc first.c $(pkg-config --cflags --libs --static xtc) -o first
 ./first
 ```
 
-```
-coroutine: computing 7 * 7
-result = 49
-```
+(`--static` adds the libraries libxtc.a was built against: liburing and
+the TLS library, when configure found them.  Set
+`PKG_CONFIG_PATH=/usr/local/lib/pkgconfig` if pkg-config does not find
+xtc.)
+
+{% include output.html file="01_hello_async.out" %}
 
 ## What just happened
 
@@ -72,7 +75,8 @@ Three objects and four calls carry the whole program.
 **The loop** ([`xtc_loop_create`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_loop.3),
 `xtc_loop_run`, `xtc_loop_destroy`). An `xtc_loop_t` is an event loop: a
 run queue of ready fibers plus an OS I/O poller (io_uring, epoll,
-kqueue, or IOCP, chosen at configure time). `xtc_loop_run` drives it,
+kqueue, IOCP, event ports, poll, or select, chosen at configure
+time).  `xtc_loop_run` drives it,
 resuming ready fibers one at a time on this thread until there is no
 more work, then returns.
 

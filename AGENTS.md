@@ -291,9 +291,10 @@ in priority order:
    it within K seeds, deterministically, with a replayable trace.
    "If you break it, the simulator finds it fast and hands you the
    exact seed" is what lets us truthfully claim FDB/TigerBeetle-grade
-   testing.  See test/sim/test_sim_bug_inject.c and
-   scripts/dst-bug-inject.sh.  When you add a new safety invariant,
-   add a planted-bug case that DST must catch.
+   testing.  See src/inc/xtc_dst_inject.h (the planted bugs) and
+   scripts/dst-bug-inject.sh (which test must catch each, and how).
+   When you add a new safety invariant, add a planted-bug case that DST
+   must catch.
 
 5. PIN EVERY FAILING SEED.  A seed that failed once is a REPRODUCER,
    and it is the only thing that proves the fix still holds next year.
@@ -346,9 +347,14 @@ gate it on the simulator in the code.
 
 The repository lives on Codeberg (`origin`,
 `ssh://git@codeberg.org/gregburd/libxtc.git`) and is mirrored to
-GitHub (`gburd/libxtc`), where the Actions CI runs: gcc and clang
-`make check`, AddressSanitizer, UndefinedBehaviorSanitizer, and a
-forced-fcontext (musl coroutine path) job.
+GitHub (`gburd/libxtc`), where the Actions CI runs (.github/workflows/
+ci.yml, on pushes to `main` and `lts/2.1` and on pull requests): gcc
+and clang `make check`, AddressSanitizer and UndefinedBehaviorSanitizer
+over `make check` and over a core DST subset, ThreadSanitizer, Valgrind, musl
+(x86-64 and aarch64), the DST tier with bug injection and the seed
+corpus, the hegel property tier, the five TLS backends, the examples,
+macOS, FreeBSD, riscv64, and an MSVC build that runs a smoke test and a
+munit subset.
 
 **After every push -- and without exception after pushing a tagged
 release -- verify CI went green.**  CI can fail on something the
@@ -403,9 +409,10 @@ green run:
    `make check-dst`.
 
 2. **A TAG DOES NOT RUN THE NIGHTLY TIERS.**  `ci.yml`'s push filter is
-   `branches: [main]`; the 100k-seed swarm and CBMC gate on
-   `schedule`/`workflow_dispatch`.  A tag arrives as a `push`, so those
-   jobs SKIP -- and a skip does not fail the pipeline.  RUN THE 100k
+   `branches: [main, lts/2.1]`; a tag runs ci.yml only through
+   release.yml's `workflow_call`, and the 100k-seed swarm and CBMC gate
+   on `schedule`/`workflow_dispatch`, so on a tag those jobs SKIP -- and
+   a skip does not fail the pipeline.  RUN THE 100k
    SWARM BY HAND at release time:
 
    ```sh
@@ -579,6 +586,19 @@ CI).  A snippet that will not build or a doc that promises behavior the
 snippet does not demonstrate is a release blocker, exactly like the API
 discipline gate.  Never paste code into a doc page that is not backed by
 a tested snippet file.
+
+The gate enforces this on the pages too (docs/**/*.md and README.md).
+Include, don't paste: a program goes in docs/_includes/snippets/NN_name.c
+and the page uses `{% include snippet.html file=... %}`; the two pages a
+forge shows as plain Markdown (README.md, docs/getting-started.md) carry
+a `<!-- snippet: NN_name.c -->` line above a copy, which must equal the
+file's "full" region.  Every other ```c block needs `<!-- fragment -->` on
+the line above it, or the gate fails naming the page and line.  Output a
+page shows lives in NN_name.out beside its snippet (`{% include
+output.html file=... %}`, or `<!-- output: NN_name.out -->` above a copy);
+the gate runs the snippet and diffs it against the file, so the real
+output wins.  The normalizer in the gate rewrites only a value the page
+says varies, one commented rule per value.
 
 DEFERRED (revisit later, do NOT attempt now): the in-page live,
 editable, re-runnable WASM playground, and making WASM a tested libxtc

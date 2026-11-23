@@ -97,3 +97,7 @@ docs/reference/api/
 *.gcov
 *.gcov.json.gz
 coverage-out/
+
+# Expected output of the doc snippets (test/docs/test_doc_snippets.sh diffs
+# each against its program); a global *.out ignore must not hide them.
+!docs/_includes/snippets/*.out

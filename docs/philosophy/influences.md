@@ -2,6 +2,7 @@
 title: Influences and lineage
 parent: Philosophy
 nav_order: 6
+permalink: /philosophy/influences/
 lede: >-
   The runtimes libxtc learned from, what it took from each, and the
   lines it deliberately did not cross.
@@ -118,7 +119,7 @@ statement, because it shapes libxtc's resource and cancellation APIs:
 > and leaks the resource. libxtc's answer is that acquire/release and
 > structured cancellation are backed by a *runtime mechanism* -- a
 > scope whose finalizers run on every exit path (normal return, error,
-> `xtc_exit`, abort, and crash caught by the fault guard), with
+> `xtc_exit_self`, abort, and crash caught by the fault guard), with
 > acquisition masked against cancellation so the release is always
 > registered -- not merely by an API you are encouraged to use
 > correctly.

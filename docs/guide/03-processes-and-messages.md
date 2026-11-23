@@ -46,11 +46,11 @@ sits in `xtc_recv` until a message arrives. No shared memory, no locks.
 
 {% include snippet.html file="03_ping_pong.c" region="full" %}
 
-```
-ping: got 1
-ping: got 3
-pong: reached 4, done
-```
+{% include output.html file="03_ping_pong.out" %}
+
+`pong` adds one to every number it receives and `ping` echoes the reply
+back, so ping sees each value; when 4 arrives ping returns, and pong's
+next receive times out after a second and it returns too.
 
 ## Three things to notice
 
@@ -125,14 +125,7 @@ death of a sender ends a wait that would otherwise last forever:
 
 {% include snippet.html file="23_recv_join.c" region="join" %}
 
-```
-nested: resource temporarily unavailable holding the A of s1, 3 left queued
-join:   ok, the pair of s2, 2 left queued
-join:   resource temporarily unavailable, 2 left queued
-join:   requested item does not exist after s3's DOWN, 3 left queued
-nested: killed waiting for its B, 0 left queued
-join:   killed waiting for its B, 1 left queued
-```
+{% include output.html file="23_recv_join.out" %}
 
 A timeout consumes nothing, so there is nothing to put back. Two costs
 remain. The parts of incomplete pairs stay in the save queue and count

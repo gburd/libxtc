@@ -77,6 +77,7 @@ socket fires again next poll with zero extra code).
 
 Register (`src/io/io_epoll.c`, `xtc_io_reg_fd`):
 
+<!-- fragment -->
 ```c
 struct epoll_event ev;
 ev.events = EPOLLIN;             /* __interest_to_events(XTC_IO_READABLE) */
@@ -86,6 +87,7 @@ epoll_ctl(io->epfd, EPOLL_CTL_ADD, fd, &ev);
 
 Wait + reap (`xtc_io_poll`):
 
+<!-- fragment -->
 ```c
 struct epoll_event evs[64];
 int got = epoll_wait(io->epfd, evs, batch, timeout_ms);
@@ -123,6 +125,7 @@ poll-cancel hash, which has only 16 buckets on a default-sized ring: at
 
 Register (`src/io/io_uring.c`, `xtc_io_reg_fd` -> `__submit_poll_add`):
 
+<!-- fragment -->
 ```c
 struct io_uring_sqe *sqe = io_uring_get_sqe(&io->ring);
 io_uring_prep_poll_add(sqe, uf->fd,
@@ -149,6 +152,7 @@ loop.
 
 Wait + reap (`xtc_io_poll`):
 
+<!-- fragment -->
 ```c
 struct io_uring_cqe *cqe;
 /* submit what is queued and wait for one CQE, in one enter
@@ -199,6 +203,7 @@ new mask (there is no implicit level-triggered re-fire the way plain
 
 Register (`src/io/io_kqueue.c`, `xtc_io_reg_fd` -> `__kev_register`):
 
+<!-- fragment -->
 ```c
 struct kevent kev;
 EV_SET(&kev, fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, tag);
@@ -207,6 +212,7 @@ kevent(io->epfd, &kev, 1, NULL, 0, NULL);
 
 Wait + reap (`xtc_io_poll`):
 
+<!-- fragment -->
 ```c
 struct kevent evs[64];
 int got = kevent(io->epfd, NULL, 0, evs, batch, tsp);
@@ -249,6 +255,7 @@ use: see the io_uring example).
 
 Register (`src/io/io_iocp.c`, `xtc_io_reg_fd` -> `__arm_poll`):
 
+<!-- fragment -->
 ```c
 o->poll_in.NumberOfHandles = 1;
 o->poll_in.Handles[0].Handle = (HANDLE)reg->base;   /* base socket handle */
@@ -261,6 +268,7 @@ NtDeviceIoControlFile(io->afd, NULL, NULL, NULL, XTC_OV_IOSB(o),
 
 Wait + reap (`xtc_io_poll`):
 
+<!-- fragment -->
 ```c
 OVERLAPPED_ENTRY batch[64];
 GetQueuedCompletionStatusEx((HANDLE)io->iocp, batch, batch_max,
@@ -281,6 +289,7 @@ async file read rather than a socket, `xtc_io_aio_submit` with
 Re-arm: mandatory and explicit, unlike the other three backends.  The
 last line of the AFD-completion branch in `xtc_io_poll` is:
 
+<!-- fragment -->
 ```c
 (void)__arm_poll(io, reg);   /* re-arm for level-triggered behaviour */
 ```

@@ -119,7 +119,7 @@ ARM64 running the x86_64 emulation layer, MSYS2 toolchains).
 |-------------|---------------|:------:|:-----------:|:----------:|-------|
 | MinGW64 gcc | 16.1.0        | OK     | 50          | 233/233    | Default Windows path; full coverage |
 | Clang64     | 22.1.4        | OK     | 50          | 48/48      | LLVM clang with MinGW runtime; 3 POSIX-only tests don't compile |
-| MSVC cl.exe | 14.50.35717   | OK     | smoke + 16 munit | 5/5 smoke; 16/16 munit | xtc.lib (45 objs incl. ml64 fcontext); standalone smoke + a POSIX-clean munit subset (16 tests across m0/m1/m10/m11/m14) built+run by build_msvc.bat step 5 as a HARD GATE (test_tls excluded: no TLS backend wired into the MSVC build) |
+| MSVC cl.exe | 14.50.35717   | OK     | smoke + 16 munit | 5/5 smoke; 16/16 munit | xtc.lib (45 objs incl. ml64 fcontext); standalone smoke + a POSIX-clean munit subset (16 tests across m0/m1/m10/m11/m14 at the time; build_msvc.bat step 5 now runs 101 munit tests plus test_tnt as a HARD GATE) (test_tls excluded: no TLS backend wired into the MSVC build) |
 
 ## Full MSVC test-surface sweep (2026-07, real cloud Windows Server 2022 x64)
 

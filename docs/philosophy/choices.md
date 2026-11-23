@@ -21,7 +21,7 @@ structs. libxtc uses fibers so the code stays linear and the variables
 stay on the stack; the cost is a small per-fiber stack instead of a
 large readability tax. Where an explicit state machine is genuinely
 wanted -- vast numbers of tiny uniform entities -- libxtc offers the
-stackless [Isolate layer]({{ '/examples/' | relative_url }}) as an opt-in, not as the
+stackless [Isolate layer]({{ '/tnt/' | relative_url }}) as an opt-in, not as the
 default.
 
 ## Shared-nothing processes, not shared state behind a mutex
@@ -67,8 +67,10 @@ Rust's `unsafe`. Not forbidden; marked.
 saves the signal mask with a syscall on every switch -- an order of
 magnitude slower than a register swap. Since the switch is the hottest
 path in the library, libxtc ships hand-written `fcontext` assembly for
-the common architectures (x86-64 ~4.4 ns/switch) and falls back to
-`ucontext` (and Win32 fibers) only where it must.
+seven architectures (x86-64 ~4.4 ns/switch).  It is the default on
+Linux x86-64 and AArch64 with glibc, on Apple Silicon, and on musl;
+other targets default to `ucontext` until their assembly is selected
+(`--with-coro=fctx`), and Windows uses Win32 fibers.
 
 ## Deterministic simulation, not just stress tests
 

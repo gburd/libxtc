@@ -20,6 +20,7 @@ Real concurrency primitives appear in M1+.
 
 ### Library version
 
+<!-- fragment -->
 ```c
 const char *xtc_version_string(void);
 int         xtc_version_components(int *major, int *minor, int *patch);
@@ -39,6 +40,7 @@ See `xtc_version_string(3)`, `xtc_version_components(3)`.
 
 ### Error codes and messages
 
+<!-- fragment -->
 ```c
 typedef enum xtc_err {
     XTC_OK         =  0,
@@ -79,6 +81,7 @@ See `xtc_strerror(3)`.
 
 ### Compile-time version macros
 
+<!-- fragment -->
 ```c
 XTC_VERSION_STRING   /* e.g. "2.3.0" */
 XTC_VERSION_MAJOR    /* 2 */
@@ -93,6 +96,7 @@ build's TLS backend (`XTC_TLS_BACKEND_*`), its I/O backend
 
 ### Atomics and compiler directives
 
+<!-- fragment -->
 ```c
 typedef enum { xtc_mo_relaxed, xtc_mo_acquire, xtc_mo_release,
                xtc_mo_acq_rel, xtc_mo_seq_cst } xtc_mo_t;

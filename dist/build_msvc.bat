@@ -159,7 +159,7 @@ set MUNIT_FAILED_LIST=
 rem  space-separated MS:TN pairs (colon-delimited so no backslash parsing).
 rem  This list is the full set proven to build+run green on a real cloud
 rem  Windows Server 2022 / MSVC 2022 host by the per-test sweep
-rem  (dist/probe_all.bat) -- 100 of the ~111 TESTS_C.  The rest are
+rem  (dist/probe_all.bat) -- 101 of the TESTS_C.  The rest are
 rem  legitimately POSIX-only (fork / socketpair / AF_UNIX / getrusage /
 rem  signals / raw-socket MSG_NOSIGNAL / xtc_osproc which is XTC_E_NOSYS
 rem  on Windows) or need a TLS backend the MSVC build does not wire

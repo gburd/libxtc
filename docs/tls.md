@@ -45,6 +45,7 @@ A condensed view of `xtc_tls.h` (the header has the full option set:
 `verify_peer_mode`, cipher and group lists, CRLs, a passphrase callback,
 SNI, a caller-supplied transport, kTLS, and peer-certificate queries):
 
+<!-- fragment -->
 ```c
 typedef struct xtc_tls_ctx  xtc_tls_ctx_t;   /* per-process: cert + key */
 typedef struct xtc_tls      xtc_tls_t;       /* per-connection state */
@@ -126,6 +127,7 @@ the backends share are static inlines in `src/io/tls_common.h`.
 
 OpenSSL's standard idiom is:
 
+<!-- fragment -->
 ```c
 int rc = SSL_do_handshake(ssl);
 if (rc <= 0) {
@@ -138,6 +140,7 @@ if (rc <= 0) {
 `xtc_tls_handshake` wraps this and exposes `wants_read/wants_write`.
 Caller pattern:
 
+<!-- fragment -->
 ```c
 xtc_tls_t *tls;
 xtc_tls_create(ctx, fd, &tls);

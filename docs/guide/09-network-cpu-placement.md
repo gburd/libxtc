@@ -60,7 +60,7 @@ done
 
 # Also move the hardware IRQs themselves off the loop cores.  Cloud
 # defaults frequently do NOT do this: on the box measured here, two of
-# eight ena vectors landed on CPUs 0 and 3, which were running fibers.
+# eight NIC vectors landed on CPUs 0 and 3, which were running fibers.
 grep eth0 /proc/interrupts | awk '{print $1}' | tr -d ':' | \
 while read irq; do echo 6,7 | sudo tee "/proc/irq/$irq/smp_affinity_list" > /dev/null; done
 ```
@@ -73,8 +73,9 @@ this. Nothing above requires a libxtc change or rebuild.
 
 ## What it measurably buys, and costs
 
-Two `c6i.8xlarge` instances over a real ena NIC (a driver box and a subject
-box, four alternated repetitions per point), at **equal total cores** --
+Two 32-vCPU x86-64 cloud instances over a real NIC (a driver box and a
+subject box, four alternated repetitions per point), at **equal total
+cores** --
 8 loops with inline softirq versus 6 loops plus 2 dedicated softirq cores:
 
 | metric | change | read this as |

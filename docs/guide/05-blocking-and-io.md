@@ -41,7 +41,7 @@ so libxtc presents one portable async file API, `xtc_aio_*`
 ([`xtc_aio(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_aio.3)):
 `xtc_aio_pread`, `xtc_aio_pwrite`, `xtc_aio_fsync`, `xtc_aio_fdatasync`.
 Where the platform has a native completion mechanism (io_uring on Linux,
-IOCP on Windows, kqueue AIO on the BSDs, event-port AIO on illumos) the
+IOCP on Windows, kqueue AIO on FreeBSD and DragonFly, event-port AIO on illumos) the
 operation completes with **zero extra threads**. Everywhere else it
 transparently falls back to the blocking pool (below) -- so you write
 storage code once, as if async file I/O is always available, and it is
@@ -58,6 +58,7 @@ calling fiber** (so the loop keeps serving everyone else), and resumes
 the fiber with the result when the worker finishes. The blocking is real
 -- but it happens on a pool thread, not the loop thread.
 
+<!-- fragment -->
 ```c
 /* inside a fiber: compute a slow hash without stalling the loop */
 int result;
@@ -85,6 +86,7 @@ libxtc parks a fiber on a GPU/NPU completion the same way it parks one
 on a socket read
 ([`xtc_accel(3)`](https://codeberg.org/gregburd/libxtc/src/branch/main/man/man3/xtc_accel.3)):
 
+<!-- fragment -->
 ```c
 /* inside a fiber: the consumer's runtime submitted work and gave us a
  * completion fence fd; park until the device is done -- no OS thread

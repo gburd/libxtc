@@ -1,0 +1,15 @@
+{%- comment -%}
+  Show the expected output of a tested snippet.
+
+  Usage:
+    {% include output.html file="03_ping_pong.out" %}
+
+  The file lives beside its snippet in _includes/snippets/.
+  test/docs/test_doc_snippets.sh runs the snippet and diffs what it
+  prints against this file, so the block a page shows is what the
+  program prints.
+{%- endcomment -%}
+{%- capture _o -%}{% include snippets/{{ include.file }} %}{%- endcapture -%}
+```
+{{ _o | rstrip }}
+```
