@@ -6,7 +6,7 @@
 [![Docs](https://github.com/gburd/libxtc/actions/workflows/pages.yml/badge.svg)](https://gburd.github.io/libxtc/)
 [![Sanitizers](https://img.shields.io/badge/tested-ASan%20%2B%20UBSan-brightgreen)](https://github.com/gburd/libxtc/actions/workflows/ci.yml)
 [![License: ISC](https://img.shields.io/badge/license-ISC-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/release-v2.3.0-informational)](https://codeberg.org/gregburd/libxtc/releases)
+[![Release](https://img.shields.io/badge/LTS-2.1.x-informational)](https://codeberg.org/gregburd/libxtc/releases)
 [![C11](https://img.shields.io/badge/C-11-blue.svg)](https://en.wikipedia.org/wiki/C11_(C_standard_revision))
 
 **[Read the documentation &rarr;](https://gburd.github.io/libxtc/)**
@@ -240,8 +240,13 @@ the *what*.
 
 ## Status and stability
 
-xtc is at **2.3**.  The compatibility promise for 2.x is in
-`docs/abi-stability.md`; the names renamed in 2.2 keep working as
+xtc ships two release lines.  The LTS line, 2.1.x on `lts/2.1`, gets
+fixes only and is the release marked Latest.  Development releases
+from `main`, named by date (vYYYY.MM.DD) and published as
+pre-releases, carry the new API; `main` is at ABI level **2.3**
+(`xtc_version_components()`, SONAME libxtc.so.2), and
+`xtc_version_string()` gives the release name.  The compatibility
+promise for 2.x is in `docs/abi-stability.md`; the names renamed in 2.2 keep working as
 deprecated aliases until 3.0 (`docs/deprecations.md`).
 
 **Binary compatibility, from 2.0.**  Every caller-allocated option,
@@ -339,6 +344,11 @@ make check                              # full test suite
 sudo make install                       # libxtc.a + headers + man pages
 ```
 
+To build a release rather than `main`, check out its tag: `v2.1.N` for
+the LTS line, or a development release's `vYYYY.MM.DD`.  The release
+pages carry the same source as a tarball, plus the amalgamation and the
+man pages.
+
 `make check` builds and runs the unit/PBT/shell-gate suite (fast, minutes).
 It does NOT include the DST suite -- that needs a separate
 `--with-io-backend=sim` build.  Run it explicitly:
@@ -399,8 +409,8 @@ follow-up).
 * `docs/abi-stability.md` -- the compatibility contract, split into what
   is mechanically enforced and what is only stated policy.
 * `docs/KNOWN_ISSUES.md` -- everything I know about that's not perfect.
-* `SECURITY.md` -- supported versions (the 2.0 LTS and the current
-  release) and how to report a vulnerability privately.
+* `SECURITY.md` -- supported versions (the 2.1 LTS line and the
+  development releases) and how to report a vulnerability privately.
 
 ## License
 

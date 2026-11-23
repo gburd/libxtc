@@ -103,6 +103,11 @@ dependencies) into `xtc.pc`.  Consumers use the usual incantation:
 The meson build emits an equivalent `xtc.pc` via
 `pkgconfig.generate()`.
 
+`Version` is the release name: 2.1.6 for an LTS release, 2026.11.24
+for a development release.  pkg-config compares a CalVer name as a
+version, so it sorts above every 2.x (`xtc >= 2.3` holds and `xtc < 3`
+does not); test XTC_VERSION_MAJOR/_MINOR for the ABI level.
+
 Verified on Linux x86_64 (gcc, autoconf build): `--modversion`,
 `--cflags`, `--libs`, and `--static --libs` all resolve against a
 temp install prefix, and a sample program links and runs against the
@@ -125,24 +130,25 @@ Every export carries a symbol version: `XTC_2.0` for the 2.0 set, and
 `XTC_2.2` and `XTC_2.3` for the functions those minors added (`nm -D`
 shows `xtc_foo@@XTC_2.0`; checked by `test/m0/test_symbols.sh`
 [C8]/[C9]), and no `__os_*` symbol leaks.  The
-SONAME carries only the SemVer major; `docs/abi-stability.md` gives the
+SONAME carries only the ABI level's major (a development release's
+CalVer name never reaches it); `docs/abi-stability.md` gives the
 policy for adding `XTC_2.N` nodes in later minors.  At release time,
 `scripts/abi-check.sh PREV_TAG` runs `abidiff` between the previous
 release and the candidate.
 
 ## Release branches and tags
 
-`main` carries the next minor.  An LTS line has its own branch,
-`lts/MAJOR.MINOR`, cut from the `vMAJOR.MINOR.0` tag.  The current one
-is `lts/2.1` (2.1.x):
+`main` carries the development releases (vYYYY.MM.DD, published as
+pre-releases).  The LTS line has its own branch, `lts/MAJOR.MINOR`; the
+current one is `lts/2.1`, cut from the v2.1.1 tag:
 
-    git branch lts/2.1 v2.1.0
+    git branch lts/2.1 v2.1.1
     git push origin lts/2.1
 
 Nothing is committed to an LTS branch directly except a backport that
 could not be cherry-picked.  What a patch release may change is the LTS
-contract in `docs/abi-stability.md` ("Long-term support"): fixes only,
-no ABI, format, default or dependency change.
+contract in `docs/abi-stability.md` ("Long-term support and release
+lines"): fixes only, no ABI, format, default or dependency change.
 
 ## Patch releases on an LTS branch
 
@@ -180,7 +186,67 @@ A security fix follows SECURITY.md's embargo: it is prepared on private
 branches, and `main` and every supported `lts/*` branch are tagged
 together on the disclosure day.
 
+## Development releases from main
+
+A development release is named by the day it is cut, vYYYY.MM.DD
+(vYYYY.MM.DD.2 for a second one that day), and carries the ABI level in
+`dist/version.in` (2.3.0 for the first).  `dist/release_name.sh` says
+how the two versions reach the build.
+
+1. Set the ABI level in `dist/version.in` by the rules in
+   `docs/abi-stability.md` ("Version numbering"): the minor moves when
+   API or symbols were added since the last release (a new XTC_2.N node
+   in `dist/libxtc.map`), the patch when only fixes were.  Regenerate
+   and commit `dist/configure`, and add the ABI level's entry to
+   `debian/changelog` and `dist/xtc.spec` if it has none.  Those entries
+   name the ABI level, not the date: the packages are built only for
+   LTS releases, and the release body is taken from the entry.
+2. Write the name into dist/release.in, in the same commit as anything
+   else the release needs:
+
+       echo 2026.11.24 > dist/release.in
+       git add -f dist/release.in
+
+   (`-f` because a global gitignore may cover `dist/`.)  The build then
+   reports `xtc_version_string()` = "2026.11.24" and pkg-config Version
+   2026.11.24, while the SONAME stays libxtc.so.2 and the file
+   libxtc.so.2.3.0.
+3. Qualify exactly as an LTS patch (step 4 above), with perf-gate
+   against the previous development release (or v2.2.0 for the first).
+   The compat job picks the previous development release, or v2.2.0,
+   by itself.
+4. Tag `main`, signed, and push the tag:
+
+       git tag -s v2026.11.24 -m "libxtc 2026.11.24"
+       git push origin main v2026.11.24
+
+   The release workflow checks that the tag is v plus the release name,
+   publishes a pre-release (never "Latest") with the source tarball,
+   the amalgamation and the man-page bundle, and builds no distro
+   packages.  On Codeberg, create the release by hand as a pre-release
+   (`tea releases create --prerelease`) with the same three files.
+5. Remove dist/release.in in the next commit on `main`, so a tree
+   between releases is named by its ABI level and cannot be mistaken
+   for the release.
+6. Check CI on the tag, as for an LTS release, and check that the
+   newest v2.1.N is still "Latest" on both forges.
+
+## Cutting a new LTS line
+
+A new LTS line is cut from `main` when the development features chosen
+to keep are there: delete dist/release.in, set `dist/version.in` to the
+line's first SemVer version (for example 2.4.0), tag it v2.4.0, and cut
+the branch from the tag (`git branch lts/2.4 v2.4.0`).  Its patch
+releases follow "Patch releases on an LTS branch".  Update the
+"Long-term support and release lines" section of
+`docs/abi-stability.md` and SECURITY.md's table when it is cut: that
+is when the previous line's end date is fixed.
+
 ## Debian / Ubuntu
+
+These packages are built for LTS releases only.  A development release
+from `main` ships source artefacts only, so it never replaces an LTS
+install.
 
 `debian/` builds two binary packages:
 

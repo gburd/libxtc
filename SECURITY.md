@@ -11,13 +11,14 @@ and what happens after you do.
 
 | Version | Status | Security fixes |
 |---|---|---|
-| 2.0.x (the first LTS) | Long-term support | Yes, until at least 18 months after 3.0.0 ships (see the LTS contract) |
-| The current minor (the newest 2.x.y) | Current | Yes |
-| 2.x minors older than the current one | Superseded | No: upgrade to the current minor (a minor is ABI-compatible within 2.x) |
+| 2.1.x (the LTS line, `lts/2.1`) | Long-term support | Yes, until at least 18 months after the next LTS line's first release (see the LTS contract) |
+| Development releases from `main` (vYYYY.MM.DD, pre-releases) | Development | Yes, in the next development release; a fix that qualifies for the LTS also ships as a 2.1.x |
+| 2.2.0 (the last SemVer release from `main`) | Superseded | No: move to 2.1.x or to a development release |
+| 2.0.x (2.0.0) | Superseded by 2.1.x | No: upgrade to 2.1.x (ABI-compatible, no rebuild) |
 | 1.x (1.0.0 to 1.59.x) | End of life | No |
 
 The support window, what a patch release may change, and the backport
-branch (`lts/2.0`) are defined in the [LTS contract](docs/abi-stability.md#long-term-support-and-the-20-lts-policy).
+branch (`lts/2.1`) are defined in the [LTS contract](docs/abi-stability.md#long-term-support-and-release-lines-policy).
 
 ## Reporting a vulnerability
 

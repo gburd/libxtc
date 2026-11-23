@@ -372,9 +372,18 @@ Each push to `main` runs the whole matrix, so batch fixes into few
 pushes: one push per patch release, not one per fix.
 
 **Branches.**  `main` takes everything first.  The LTS line is
-`lts/2.1` (2.1.x): bug fixes only, cherry-picked from `main` after
-they land there.  New features, API changes and new error codes stay
-on `main` and ship in development releases.
+`lts/2.1` (2.1.x, SemVer): bug fixes only, cherry-picked from `main`
+after they land there; its newest release is "Latest" on both forges.
+New features, API changes and new error codes stay on `main` and ship
+in development releases, named by date (vYYYY.MM.DD[.N]) and published
+as pre-releases with source artefacts only (no .deb/.rpm).  v2.2.0 was
+the last SemVer release from `main`.  A development release keeps two
+versions: dist/version.in holds the ABI level (2.3.0: the
+XTC_VERSION_MAJOR/_MINOR/_PATCH macros, the SONAME libxtc.so.2, the
+symbol nodes XTC_2.N), and dist/release.in, committed only on the
+release commit, holds the date name (XTC_VERSION_STRING, pkg-config's
+Version, the tag); dist/release_name.sh is the rule every reader
+uses.  The procedures for both kinds are in docs/PUBLISHING.md.
 
 ```sh
 # wait for the mirror to sync (~30-60s), then:
