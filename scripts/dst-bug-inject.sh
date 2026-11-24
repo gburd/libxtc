@@ -101,6 +101,8 @@ write_cases() {
 		"36;test_sim_wait_fd_only;0;1;a receive after a mail-blind wait was never woken" \
 		"63;test_sim_rcu;0;0;a slotless reader saw a freed node" \
 		"64;test_sim_rcu;0;0;an unrecorded retire freed a node under a reader" \
+		"92;test_sim_rcu;0;0;the epoch lost an advance" \
+		"93;test_sim_rcu;0;0;an aliased bucket freed a node a reader held" \
 		"65;test_sim_lrlock;0;0;a write was lost .* when the oplog could not grow" \
 		"67;test_sim_partition;0;0;a DOWN or link EXIT was lost under a partition" \
 		"68;test_sim_offloop_wait;0;0;a timed wait off a fiber did not return at once" \

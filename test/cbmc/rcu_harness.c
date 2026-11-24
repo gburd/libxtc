@@ -20,7 +20,8 @@
  *	  read_unlock: clear the slot (active_epoch = 0).
  *	  retire:     stamp the object with the CURRENT epoch (the bucket
  *	              key e % N in rcu.c); mark it retired-not-freed.
- *	  synchronize: advance the global epoch (old -> old+1); wait for
+ *	  synchronize: advance the global epoch with a fetch-add
+ *	              (old -> old+1); wait for
  *	              every reader with active_epoch in (0, old] to leave;
  *	              then reclaim what was retired two epochs back
  *	              (new_e - 2) -- the "one full grace period ahead"
@@ -33,6 +34,12 @@
  *	expose a premature free (the reader still referencing it).  If
  *	rcu.c's epoch/drain/reclaim rule drifts, this must be updated in
  *	lockstep.
+ *
+ *	ORDERING: CBMC explores sequentially consistent interleavings, so
+ *	this model cannot see the store-buffer reorder the seq_cst fences in
+ *	rcu.c rule out (a reader's epoch publish after its pointer load);
+ *	that argument is in the comment above xtc_rcu_synchronize and the
+ *	threaded test test_rcu /publish_order.
  *
  *	BOUND: one reader racing one retire+synchronize cycle (plus a
  *	second synchronize to actually reach the reclaim epoch, since
@@ -72,11 +79,10 @@ rcu_retire(void)
 static void
 rcu_synchronize(void)
 {
-	uint64_t old = atomic_load_explicit(&g_epoch, memory_order_acquire);
+	uint64_t old = atomic_fetch_add_explicit(&g_epoch, 1,
+	    memory_order_seq_cst);
 	uint64_t new_e = old + 1;
 	int i;
-
-	atomic_store_explicit(&g_epoch, new_e, memory_order_release);
 
 	/* Wait for the reader if it is active in epoch <= old. */
 	for (i = 0; i < DRAIN_SPINS; i++) {
@@ -89,8 +95,9 @@ rcu_synchronize(void)
 	}
 
 	/* Reclaim the object iff it was retired and the global epoch has
-	 * advanced two full grace periods past its retire epoch (rcu.c:
-	 * bucket (E % N) is recycle-safe once epoch reaches E + 2). */
+	 * advanced two full grace periods past its retire epoch (rcu.c
+	 * stamps each record with its epoch and frees it once the epoch
+	 * reaches E + 2). */
 	if (new_e >= 2 &&
 	    atomic_load_explicit(&obj_retired, memory_order_acquire) &&
 	    atomic_load_explicit(&obj_retire_epoch, memory_order_relaxed)

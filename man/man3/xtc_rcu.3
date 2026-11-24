@@ -47,6 +47,18 @@ have exited their critical sections.
 blocks until all currently-active readers have exited.  Used by
 writers that want to free old state synchronously rather than via
 the deferred-retire path.
+Any number of threads and fibers may call
+.Fn xtc_rcu_synchronize
+at once: each call advances the epoch by exactly one, and frees only
+what its own grace period covers.
+.Pp
+The read side's first
+.Fn xtc_rcu_read_lock
+publishes its epoch and then runs a sequentially consistent fence, so
+the pointer loads that follow cannot be reordered ahead of the publish
+(about 9 ns on x86-64; nested calls and
+.Fn xtc_rcu_read_unlock
+take none).
 .Pp
 The implementation tracks per-reader epoch counters in a registered
 linked list: one per OS thread, and one per fiber when the reader runs
@@ -55,7 +67,7 @@ loop inside a read-side critical section.
 A fiber looks its counter up under a lock on its first
 .Fn xtc_rcu_read_lock
 and keeps it, so later read-side sections on the fiber take no lock.
-Retired records bucket by epoch;
+Retired records are stamped with their epoch;
 records two epochs old are guaranteed safe to free.
 .Pp
 Out of memory,
@@ -92,3 +104,9 @@ Memory is 2x; reclamation is immediate via the publish-drain.
 .Xr xtc 7
 .Sh HISTORY
 Appeared in xtc 0.1.
+Releases before 2.1.7 could free a retired object while a reader still
+held it: when two or more calls of
+.Fn xtc_rcu_synchronize
+were in flight at once, from threads or from fibers on one loop or
+several, and, even with a single writer, when a reader and a writer ran
+on different OS threads.

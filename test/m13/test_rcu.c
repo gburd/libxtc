@@ -5,11 +5,17 @@
  * test/m13/test_rcu.c -- verifies M13a epoch reclamation.
  */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* pthread_setaffinity_np, cpu_set_t */
+#endif
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "munit.h"
 #include "xtc.h"
@@ -612,6 +618,273 @@ test_reader_oom(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * Concurrent synchronize (davros report 22).  The epoch advanced with a
+ * load then a store, so two callers at once could both store E+1, and
+ * a caller preempted between the two moved the epoch backwards.
+ */
+#define CS_THREADS 8
+#define CS_CALLS 20000
+
+static void *
+cs_syncer(void *arg)
+{
+	int i;
+	(void)arg;
+	for (i = 0; i < CS_CALLS; i++)
+		xtc_rcu_synchronize();
+	return NULL;
+}
+
+static MunitResult
+test_concurrent_synchronize(const MunitParameter p[], void *d)
+{
+	pthread_t th[CS_THREADS];
+	uint64_t e0, e1;
+	int i;
+	(void)p;
+	(void)d;
+
+	munit_assert_int(xtc_rcu_init(), ==, XTC_OK);
+	e0 = xtc_rcu_current_epoch();
+	for (i = 0; i < CS_THREADS; i++)
+		munit_assert_int(pthread_create(&th[i], NULL, cs_syncer, NULL),
+		    ==, 0);
+	for (i = 0; i < CS_THREADS; i++)
+		pthread_join(th[i], NULL);
+	e1 = xtc_rcu_current_epoch();
+	munit_assert_uint64(e1 - e0, ==, (uint64_t)CS_THREADS * CS_CALLS);
+	xtc_rcu_fini();
+	return MUNIT_OK;
+}
+
+/*
+ * Readers and writers on OS threads at once.  Writers swap a published
+ * node, retire the old one and synchronize; the free callback poisons
+ * the node before it frees it.  A reader rechecks the node it holds
+ * across its read-side, so a node freed under it reads as poisoned
+ * (and is a heap-use-after-free under ASan).
+ */
+#define ST_READERS 6
+#define ST_WRITERS 4
+#define ST_SWAPS 3000
+#define ST_LIVE 0x11FE1111FE111111ULL
+#define ST_DEAD 0xDEADBEEFDEADBEEFULL
+
+struct st_node {
+	_Atomic uint64_t sentinel;
+};
+
+static _Atomic(struct st_node *) g_st_ptr;
+static atomic_int g_st_bad;
+static atomic_int g_st_writers_left;
+static atomic_int g_st_alloc;
+static atomic_int g_st_freed;
+
+static void
+st_free(void *p)
+{
+	struct st_node *n = p;
+	atomic_store_explicit(&n->sentinel, ST_DEAD, memory_order_release);
+	atomic_fetch_add_explicit(&g_st_freed, 1, memory_order_relaxed);
+	free(n);
+}
+
+static struct st_node *
+st_new(void)
+{
+	struct st_node *n = malloc(sizeof *n);
+	munit_assert_not_null(n);
+	atomic_store_explicit(&n->sentinel, ST_LIVE, memory_order_relaxed);
+	atomic_fetch_add_explicit(&g_st_alloc, 1, memory_order_relaxed);
+	return n;
+}
+
+static void *
+st_reader(void *arg)
+{
+	struct st_node *n;
+	int k;
+	(void)arg;
+	while (atomic_load_explicit(&g_st_writers_left, memory_order_acquire) > 0) {
+		xtc_rcu_read_lock();
+		n = atomic_load_explicit(&g_st_ptr, memory_order_acquire);
+		for (k = 0; k < 64; k++) {
+			if (atomic_load_explicit(&n->sentinel, memory_order_acquire) !=
+			    ST_LIVE)
+				atomic_fetch_add_explicit(&g_st_bad, 1,
+				    memory_order_relaxed);
+			if ((k & 15) == 0)
+				sched_yield();
+		}
+		xtc_rcu_read_unlock();
+	}
+	return NULL;
+}
+
+static void *
+st_writer(void *arg)
+{
+	struct st_node *old;
+	int i;
+	(void)arg;
+	for (i = 0; i < ST_SWAPS; i++) {
+		old = atomic_exchange_explicit(&g_st_ptr, st_new(),
+		    memory_order_acq_rel);
+		xtc_rcu_retire(old, st_free);
+		xtc_rcu_synchronize();
+	}
+	atomic_fetch_sub_explicit(&g_st_writers_left, 1, memory_order_release);
+	return NULL;
+}
+
+static MunitResult
+test_concurrent_stress(const MunitParameter p[], void *d)
+{
+	pthread_t rd[ST_READERS], wr[ST_WRITERS];
+	int i;
+	(void)p;
+	(void)d;
+
+	munit_assert_int(xtc_rcu_init(), ==, XTC_OK);
+	atomic_store_explicit(&g_st_bad, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_st_alloc, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_st_freed, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_st_writers_left, ST_WRITERS, memory_order_seq_cst);
+	atomic_store_explicit(&g_st_ptr, st_new(), memory_order_seq_cst);
+	for (i = 0; i < ST_READERS; i++)
+		munit_assert_int(pthread_create(&rd[i], NULL, st_reader, NULL),
+		    ==, 0);
+	for (i = 0; i < ST_WRITERS; i++)
+		munit_assert_int(pthread_create(&wr[i], NULL, st_writer, NULL),
+		    ==, 0);
+	for (i = 0; i < ST_WRITERS; i++)
+		pthread_join(wr[i], NULL);
+	for (i = 0; i < ST_READERS; i++)
+		pthread_join(rd[i], NULL);
+	munit_assert_int(atomic_load_explicit(&g_st_bad, memory_order_seq_cst), ==, 0);
+	xtc_rcu_retire(atomic_exchange_explicit(&g_st_ptr, NULL, memory_order_acq_rel),
+	    st_free);
+	for (i = 0; i < 3; i++)
+		xtc_rcu_synchronize();
+	munit_assert_int(atomic_load_explicit(&g_st_freed, memory_order_seq_cst), ==,
+	    atomic_load_explicit(&g_st_alloc, memory_order_seq_cst));
+	xtc_rcu_fini();
+	return MUNIT_OK;
+}
+
+/*
+ * The store-buffer case.  Round k: the writer stores g_po_flag = k, then
+ * synchronizes, then stores g_po_done = k.  The reader enters a read
+ * side and loads g_po_flag.  If it saw an older value it is a reader the
+ * writer's grace period must wait for, so it must never see
+ * g_po_done == k before it leaves.  Without a full fence between a
+ * reader's epoch publish and its loads (and between the writer's advance
+ * and its scan), the publish can sit in the reader's store buffer while
+ * its load runs, the scan misses it, and synchronize returns under it.
+ * With the fence after the publish removed, 10 of 20 runs failed on a
+ * 48-core x86-64 host (1 to 13 violations each; the raw litmus failed
+ * 1 in 20 to 9 in 10 runs, by core pair and load, and never on two
+ * hyperthreads of one core, which is why the test pins the threads to
+ * two cores).  So it catches a regression only some of the time; the
+ * argument above xtc_rcu_synchronize is the guarantee.
+ */
+#define PO_ROUNDS 10000000L
+static atomic_long g_po_flag, g_po_done, g_po_go, g_po_bad;
+
+static void *
+po_reader(void *arg)
+{
+	long k, f;
+	int i;
+	(void)arg;
+	for (k = 1; k <= PO_ROUNDS; k++) {
+		while (atomic_load_explicit(&g_po_go, memory_order_acquire) < k)
+			;
+		xtc_rcu_read_lock();
+		f = atomic_load_explicit(&g_po_flag, memory_order_acquire);
+		for (i = 0; f < k && i < 200; i++)
+			if (atomic_load_explicit(&g_po_done, memory_order_acquire) >=
+			    k) {
+				atomic_fetch_add_explicit(&g_po_bad, 1,
+				    memory_order_relaxed);
+				break;
+			}
+		xtc_rcu_read_unlock();
+	}
+	return NULL;
+}
+
+/*
+ * Put the writer (the calling thread) and the reader on two different
+ * cores, never two hyperthreads of one core: siblings see each other's
+ * buffered stores sooner and the window never opened between them.  Best
+ * effort, Linux only: cpu 0 and the first cpu that is not its sibling.
+ */
+static void
+po_pin_cores(pthread_t reader)
+{
+#if defined(__linux__)
+	FILE *f = fopen("/sys/devices/system/cpu/cpu0/topology/"
+	                "thread_siblings_list",
+	    "r");
+	int a = 0, b = 0, other;
+	cpu_set_t set;
+
+	if (f == NULL)
+		return;
+	if (fscanf(f, "%d%*[,-]%d", &a, &b) < 1)
+		b = a;
+	fclose(f);
+	other = (a == 0 && b == 1) ? 2 : 1;
+	if (other == b)
+		other++;
+	if (sysconf(_SC_NPROCESSORS_ONLN) <= other)
+		return;
+	CPU_ZERO(&set);
+	CPU_SET(0, &set);
+	(void)pthread_setaffinity_np(pthread_self(), sizeof set, &set);
+	CPU_ZERO(&set);
+	CPU_SET(other, &set);
+	(void)pthread_setaffinity_np(reader, sizeof set, &set);
+#else
+	(void)reader;
+#endif
+}
+
+static MunitResult
+test_publish_order(const MunitParameter p[], void *d)
+{
+	pthread_t th;
+	long k;
+	(void)p;
+	(void)d;
+
+	munit_assert_int(xtc_rcu_init(), ==, XTC_OK);
+	atomic_store_explicit(&g_po_flag, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_po_done, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_po_go, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_po_bad, 0, memory_order_seq_cst);
+	munit_assert_int(pthread_create(&th, NULL, po_reader, NULL), ==, 0);
+	po_pin_cores(th);
+	for (k = 1; k <= PO_ROUNDS; k++) {
+		atomic_store_explicit(&g_po_go, k, memory_order_release);
+		atomic_store_explicit(&g_po_flag, k, memory_order_seq_cst);
+		xtc_rcu_synchronize();
+		atomic_store_explicit(&g_po_done, k, memory_order_release);
+		/* A no-op (this thread wrote g_po_flag), but it changes the
+		 * timing: without it the planted reorder was caught in 0 of
+		 * 20 runs, with it in 10 of 20. */
+		while (atomic_load_explicit(&g_po_flag, memory_order_relaxed) != k)
+			;
+	}
+	pthread_join(th, NULL);
+	munit_assert_long(atomic_load_explicit(&g_po_bad, memory_order_seq_cst), ==,
+	    0);
+	xtc_rcu_fini();
+	return MUNIT_OK;
+}
+
 static MunitTest tests[] = {
 	{ "/basic",          test_basic,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/blocks_reclaim", test_blocks_reclaim,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -625,6 +898,12 @@ static MunitTest tests[] = {
 	    NULL },
 	{ "/reader_oom", test_reader_oom, NULL, NULL, MUNIT_TEST_OPTION_NONE,
 	    NULL },
+	{ "/concurrent_synchronize", test_concurrent_synchronize, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/concurrent_stress", test_concurrent_stress, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/publish_order", test_publish_order, NULL, NULL,
+	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m13/rcu", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

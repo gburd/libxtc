@@ -66,7 +66,8 @@ XTC_API void xtc_rcu_fini(void);
  * (refcount-style).  A read-side on a fiber may span a yield, a park
  * or a migration to another loop.  No system call, no lock, no atomic
  * compare-exchange on the fast path (a fiber's first read-side takes a
- * lock once, to register its slot). */
+ * lock once, to register its slot); an outermost read_lock runs one
+ * full memory fence after publishing its epoch. */
 XTC_API void xtc_rcu_read_lock(void);
 XTC_API void xtc_rcu_read_unlock(void);
 
@@ -76,8 +77,9 @@ XTC_API void xtc_rcu_read_unlock(void);
 XTC_API void xtc_rcu_retire(void *p, xtc_rcu_free_fn fn);
 
 /* Advance the global epoch and reclaim everything that's now safe.
- * Safe to call from any thread.  Blocks briefly while waiting for
- * readers in the previous epoch to drain. */
+ * Safe to call from any thread, and from several at once: each call
+ * advances the epoch by one.  Blocks while waiting for readers in the
+ * previous epoch to drain. */
 XTC_API void xtc_rcu_synchronize(void);
 
 XTC_API uint64_t xtc_rcu_current_epoch(void);

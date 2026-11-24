@@ -563,6 +563,178 @@ check_oom(uint64_t seed)
 	return 0;
 }
 
+/*
+ * Concurrent-writer phases (davros report 22).
+ *
+ * Count: CW_WRITERS fibers each call synchronize CW_SYNCS times.  The
+ * epoch must rise by exactly one per call (plant 92, RCU_EPOCH_STORE:
+ * a load and a store lose advances when two writers interleave).
+ *
+ * Alias: one writer (w1) waits in synchronize for a long reader while a
+ * second fiber (w2), the long reader itself, leaves, advances the epoch
+ * two more, enters a new read-side, unlinks the node it holds and
+ * retires it.  That node sits in the bucket w1 empties when it wakes, so
+ * w1 must leave it for its own grace period (plant 93,
+ * RCU_RECLAIM_ALIAS).  w1 yields in its drain loop, so the window opens
+ * on every seed.
+ */
+#define CW_WRITERS 3
+#define CW_SYNCS 20
+#define AL_HOLD 8
+static uint64_t g_al_e0; /* the epoch w2 entered its first read-side at */
+static atomic_int g_al_in; /* w2 holds its first read-side */
+
+static void
+cw_writer(void *arg)
+{
+	int i;
+
+	(void)arg;
+	for (i = 0; i < CW_SYNCS; i++) {
+		xtc_rcu_synchronize();
+		xtc_yield();
+	}
+	atomic_fetch_add_explicit(&g_wr_done, 1, memory_order_relaxed);
+}
+
+static void
+al_w1(void *arg)
+{
+	(void)arg;
+	while (atomic_load_explicit(&g_al_in, memory_order_acquire) == 0)
+		xtc_yield();
+	xtc_rcu_synchronize();
+	atomic_fetch_add_explicit(&g_wr_done, 1, memory_order_relaxed);
+}
+
+static void
+al_w2(void *arg)
+{
+	struct node *n, *nu;
+	int k;
+
+	(void)arg;
+	xtc_rcu_read_lock();
+	g_al_e0 = xtc_rcu_current_epoch();
+	atomic_store_explicit(&g_al_in, 1, memory_order_release);
+	/* Wait for w1 to advance the epoch and park in its drain loop. */
+	while (xtc_rcu_current_epoch() == g_al_e0)
+		xtc_yield();
+	xtc_rcu_read_unlock();
+	/* No yield from here to the retire: w1 stays parked. */
+	xtc_rcu_synchronize();
+	xtc_rcu_synchronize();
+	xtc_rcu_read_lock();
+	n = atomic_load_explicit(&g_ptr, memory_order_acquire);
+	nu = node_new(n->gen + 1);
+	if (nu == NULL) {
+		xtc_rcu_read_unlock();
+		return;
+	}
+	n = atomic_exchange_explicit(&g_ptr, nu, memory_order_acq_rel);
+	xtc_rcu_retire(n, node_free);
+	for (k = 0; k < AL_HOLD; k++) {
+		xtc_yield();
+		if (atomic_load_explicit(&n->sentinel, memory_order_acquire) !=
+		    NODE_LIVE_MAGIC)
+			atomic_fetch_add_explicit(&g_uaf, 1, memory_order_relaxed);
+	}
+	rcu_fold((long)n->gen);
+	xtc_rcu_read_unlock();
+	atomic_fetch_add_explicit(&g_rd_done, 1, memory_order_relaxed);
+}
+
+/* One run of the count (alias == 0) or the alias (alias == 1) phase. */
+static int
+run_cw(uint64_t seed, int alias, uint64_t *out_adv, int *out_uaf,
+    long *out_hash, uint64_t *out_state)
+{
+	xtc_exec_t *e = NULL;
+	struct node *last;
+	uint64_t e0;
+	int i, rc;
+
+	atomic_store_explicit(&g_ptr, NULL, memory_order_seq_cst);
+	atomic_store_explicit(&g_alloc, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_freed, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_uaf, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_rd_done, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_wr_done, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_al_in, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_hash, 0, memory_order_seq_cst);
+
+	if (xtc_rcu_init() != XTC_OK)
+		return -1;
+	atomic_store_explicit(&g_ptr, node_new(1), memory_order_release);
+	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+		return -1;
+	if (alias) {
+		(void)xtc_proc_spawn(xtc_exec_loop(e, 0), al_w1, NULL, NULL,
+		    NULL);
+		(void)xtc_proc_spawn(xtc_exec_loop(e, 1), al_w2, NULL, NULL,
+		    NULL);
+	} else {
+		for (i = 0; i < CW_WRITERS; i++) {
+			xtc_loop_t *l = xtc_exec_loop(e, (unsigned)(i % N_LOOPS));
+			(void)xtc_proc_spawn(l, cw_writer, NULL, NULL, NULL);
+		}
+	}
+	e0 = xtc_rcu_current_epoch();
+	rc = xtc_sim_exec_run(e, seed, 5000000);
+	*out_adv = xtc_rcu_current_epoch() - e0;
+
+	last = atomic_exchange_explicit(&g_ptr, NULL, memory_order_acq_rel);
+	if (last != NULL)
+		xtc_rcu_retire(last, node_free);
+	for (i = 0; i < 4; i++)
+		xtc_rcu_synchronize();
+	*out_uaf = atomic_load_explicit(&g_uaf, memory_order_seq_cst);
+	if (atomic_load_explicit(&g_freed, memory_order_seq_cst) !=
+	    atomic_load_explicit(&g_alloc, memory_order_seq_cst))
+		*out_uaf += 1000;
+	*out_hash = atomic_load_explicit(&g_hash, memory_order_seq_cst);
+	*out_state = xtc_sim_state_hash(e);
+	(void)xtc_exec_fini(e);
+	xtc_rcu_fini();
+	return rc;
+}
+
+static int
+check_cw(uint64_t seed, int alias)
+{
+	const char *ph = alias ? "alias" : "count";
+	uint64_t a1 = 0, a2 = 0, s1 = 0, s2 = 0, want;
+	int uaf1 = 0, uaf2 = 0;
+	long h1 = 0, h2 = 0;
+
+	if (run_cw(seed, alias, &a1, &uaf1, &h1, &s1) != XTC_OK) {
+		printf("FAIL: %s: run did not quiesce (seed %llx)\n", ph,
+		    (unsigned long long)seed);
+		return 1;
+	}
+	(void)run_cw(seed, alias, &a2, &uaf2, &h2, &s2);
+	want = alias ? 3 : (uint64_t)CW_WRITERS * CW_SYNCS;
+	printf("rcu %s seed %llx: advanced=%llu want=%llu uaf=%d\n", ph,
+	    (unsigned long long)seed, (unsigned long long)a1,
+	    (unsigned long long)want, uaf1);
+	if (a1 != want) {
+		printf("FAIL: %s: the epoch lost an advance (%llu of %llu)\n",
+		    ph, (unsigned long long)a1, (unsigned long long)want);
+		return 1;
+	}
+	if (uaf1 != 0) {
+		printf("FAIL: %s: an aliased bucket freed a node a reader "
+		       "held (%d)\n",
+		    ph, uaf1);
+		return 1;
+	}
+	if (a1 != a2 || uaf1 != uaf2 || h1 != h2 || s1 != s2) {
+		printf("FAIL: %s: did not replay (hash %ld/%ld)\n", ph, h1, h2);
+		return 1;
+	}
+	return 0;
+}
+
 static int
 run_rcu(uint64_t seed, int *out_rd, int *out_wr, int *out_uaf,
     int *out_alloc, int *out_freed, long *out_hash, uint64_t *out_state)
@@ -716,12 +888,17 @@ main(void)
 		return 1;
 	if (check_oom(0x5C0FF) != 0 || check_oom(0xB1DE7) != 0)
 		return 1;
+	if (check_cw(0x5C0FF, 0) != 0 || check_cw(0xB1DE7, 0) != 0 ||
+	    check_cw(0x5C0FF, 1) != 0 || check_cw(0xB1DE7, 1) != 0)
+		return 1;
 
 	printf("OK: rcu under DST -- per-fiber reader slot keeps read-sides "
 	       "isolated (no reader saw a freed node), cooperative-yield "
 	       "synchronize drains without hanging, every retired node "
 	       "reclaimed, fibers that live through xtc_rcu_fini stay "
-	       "visible, nothing freed under a reader out of memory; "
+	       "visible, nothing freed under a reader out of memory, "
+	       "concurrent writers advance the epoch once each and "
+	       "free nothing early; "
 	       "replayed byte-identically and a different seed "
 	       "reorders but stays consistent\n");
 	return 0;

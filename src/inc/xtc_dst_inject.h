@@ -104,6 +104,12 @@
  *	                   (test_sim_down_kind).
  *	 32  INITEXIT  -- svr.c returns normally after a failed init, so the
  *	                   server's DOWN reads CLEAN (test_sim_down_kind).
+ *	 92  RCU_EPOCH_STORE -- rcu.c advances the epoch with a load and
+ *	                   a store, so concurrent writers lose advances
+ *	                   (test_sim_rcu).
+ *	 93  RCU_RECLAIM_ALIAS -- rcu.c empties a whole epoch bucket, so a
+ *	                   writer that waited frees a newer retirement
+ *	                   under its reader (test_sim_rcu).
  *
  *	NOT plantable under DST (an honest gap, recorded so it is not
  *	mistaken for missing coverage): the xtc_amutex mutual-exclusion and
@@ -314,5 +320,22 @@
  * names (test_sim_forged_down: "a forged DOWN dropped a live name").
  */
 #define XTC_DST_BUG_REG_FORGED_DOWN 78
+
+/*
+ * 92 RCU_EPOCH_STORE: xtc_rcu_synchronize advances the epoch with a load
+ * and a store, not a fetch-add, and (on the simulator) yields between
+ * them, the preemption a thread can take there.  Two writers' advances
+ * collapse into one (test_sim_rcu: "the epoch lost an advance").
+ */
+#define XTC_DST_BUG_RCU_EPOCH_STORE 92
+
+/*
+ * 93 RCU_RECLAIM_ALIAS: xtc_rcu_synchronize empties the whole bucket
+ * (epoch % 4) instead of the records two or more epochs old, so while
+ * one writer waits for a long reader, others advance the epoch four past
+ * it and an object retired then, still held by a newer reader, is freed
+ * with the bucket (test_sim_rcu: "an aliased bucket freed a node").
+ */
+#define XTC_DST_BUG_RCU_RECLAIM_ALIAS 93
 
 #endif /* XTC_DST_INJECT_H */

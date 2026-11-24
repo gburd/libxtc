@@ -12,9 +12,11 @@
  *	synchronize advances the epoch and waits until every
  *	thread is either at the new epoch or has no active read.
  *
- *	Retired objects sit on a 3-bucket ring keyed on epoch & 3.
- *	Bucket E gets freed when the global epoch reaches E+2 (one
- *	full grace period of buffer ahead).
+ *	Retired objects sit on a 4-bucket ring keyed on epoch % 4,
+ *	each record stamped with its epoch.  A record retired in
+ *	epoch E is freed by the synchronize that takes the epoch to
+ *	E+2 or later (one full grace period of buffer ahead); see
+ *	xtc_rcu_synchronize for why the stamp, not the bucket, decides.
  *
  *	Fibers: many fibers share one OS thread, and a fiber may yield,
  *	park or migrate to another loop's thread inside a read-side, so
@@ -75,6 +77,7 @@ struct retired {
 	void              *p;
 	xtc_rcu_free_fn    fn;
 	struct retired    *next;
+	uint64_t epoch; /* the global epoch it was retired in */
 	int heap; /* from the heap, not the slab */
 };
 
@@ -428,6 +431,7 @@ __rcu_noslot_enter(void)
 		return;
 	++*__rcu_noslot_nest();
 	(void)atomic_fetch_add_explicit(&__rcu_noslot, 1, memory_order_seq_cst);
+	atomic_thread_fence(memory_order_seq_cst); /* F_R, as in read_lock */
 }
 
 /* The matching exit, for a read-side that had no slot. */
@@ -498,6 +502,9 @@ xtc_rcu_read_lock(void)
 		    memory_order_acquire);
 		atomic_store_explicit(&t->active_epoch, e,
 		    memory_order_release);
+		/* F_R: the publish before any pointer load (the store-buffer
+		 * case; see xtc_rcu_synchronize). */
+		atomic_thread_fence(memory_order_seq_cst);
 	}
 }
 
@@ -543,27 +550,100 @@ xtc_rcu_retire(void *p, xtc_rcu_free_fn fn)
 	r->heap = heap;
 	r->p = p;
 	r->fn = fn;
+	/* F_U: the caller's unlink before the epoch read (see
+	 * xtc_rcu_synchronize). */
+	atomic_thread_fence(memory_order_seq_cst);
 	(void)__xtc_mtx_lock(&__rcu.lock);
-	e = atomic_load_explicit(&__rcu.epoch, memory_order_relaxed);
+	e = atomic_load_explicit(&__rcu.epoch, memory_order_seq_cst);
 	b = (int)(e % XTC_RCU_NBUCKETS);
+	r->epoch = e;
 	r->next = __rcu.buckets[b];
 	__rcu.buckets[b] = r;
 	(void)__xtc_mtx_unlock(&__rcu.lock);
 }
 
-/* Wait for all readers in the OLD epoch (the one before we advanced)
- * to leave.  Then reclaim the bucket two epochs back. */
+/*
+ * Advance the epoch, wait for every reader in an older epoch to leave,
+ * then free what was retired two or more epochs back.
+ *
+ * Several threads may call this at once, so the argument is per caller
+ * W (old = the value its fetch-add returned, new_e = old + 1).  The
+ * fetch-add gives every caller its own epoch: the epoch rises by one per
+ * call and never moves backwards.  W frees exactly the records stamped
+ * r <= new_e - 2.  The buckets are only an index (epoch % N): while W
+ * waits, other callers can advance the epoch N or more past it and a
+ * later retirement lands in the bucket W empties, so each record's own
+ * stamp decides.  A record stamped r is still always freed: the caller
+ * that advances to r + 2 scans its bucket after the retire released the
+ * lock.
+ *
+ * Why no reader can hold a record W frees.  A reader's read_lock loads
+ * the epoch (e), publishes it (P), then runs fence F_R; xtc_rcu_retire
+ * runs fence F_U after the caller's unlink and before reading the epoch
+ * (r); W runs fence F_W after its fetch-add and before scanning the
+ * slots.  All three are seq_cst fences, so they are totally ordered.
+ * Suppose a reader reached X (its pointer load missed the unlink) and W
+ * frees X (r <= old - 1).
+ *
+ *   1. F_R precedes F_U: otherwise the unlink, before F_U, is visible to
+ *      the reader's pointer load, after F_R, and it cannot reach X.
+ *   2. F_U precedes F_W: otherwise retire's epoch read, after F_U, sees
+ *      W's fetch-add, before F_W, and r >= new_e.
+ *   3. e <= r.  Otherwise retire's epoch read, after F_U, read a value
+ *      older in the epoch's modification order than the seq_cst
+ *      fetch-add A that wrote e (or one before what the reader read), so
+ *      F_U precedes A in S; and A is coherence-ordered before the
+ *      reader's epoch load, before F_R, so A precedes F_R in S.  Then F_U
+ *      precedes F_R, against 1.  (C11 as revised by P0668, the rules
+ *      on S and coherence-ordered-before.)
+ *   4. F_R precedes F_W (1, 2), and P is before F_R, so W's scan, after
+ *      F_W, reads P or a later store to that slot.  P is e <= r < old,
+ *      so W waits; a later store is the reader's unlock, a release
+ *      store W's acquire scan reads, so the read side that reached X
+ *      happens before the free.  The scan does see the slot: it was
+ *      registered under __rcu.lock before P, and had W's scan held the
+ *      lock first, F_W would happen before F_R.
+ *
+ * Steps 1 and 2 use the fence rule for reads (a load after fence Y sees
+ * a store before fence X, or a later one, when X precedes Y), step 4 the
+ * same rule for the slot, and step 3 the P0668 rules tying S to
+ * coherence order.  The epoch's writers are seq_cst fetch-adds, plus
+ * xtc_rcu_fini, which runs with no readers.
+ *
+ * A reader preempted between loading the epoch and publishing it is
+ * covered: its e is stale, but step 3 bounds it by r whenever it is
+ * inside, and step 4 needs only P before F_R.  Without F_R and F_W, the
+ * scan can miss a publish still in the reader's store buffer while the
+ * reader's pointer load has already run (the store-buffer case; test/m13
+ * test_rcu /publish_order shows it on x86).  Without F_U the unlink can
+ * likewise be late against retire's epoch read.  A slotless reader's
+ * count works the same way, with F_R after its increment.
+ */
 void
 xtc_rcu_synchronize(void)
 {
 	uint64_t old, new_e;
 	struct rcu_tls *t;
-	struct retired *to_free, *r, *next;
+	struct retired *to_free, *r, *next, **pp;
 	int reclaim_bucket;
 
-	old = atomic_load_explicit(&__rcu.epoch, memory_order_acquire);
+	if (XTC_DST_BUG(XTC_DST_BUG_RCU_EPOCH_STORE)) {
+		old = atomic_load_explicit(&__rcu.epoch, memory_order_acquire);
+		if (__xtc_current_task() != NULL) {
+			/* The preemption between load and store, on the sim. */
+			void *proc_ctx = __xtc_proc_ctx_save();
+			xtc_yield();
+			__xtc_proc_ctx_restore(proc_ctx);
+		}
+		atomic_store_explicit(&__rcu.epoch, old + 1,
+		    memory_order_release);
+	} else {
+		old = atomic_fetch_add_explicit(&__rcu.epoch, 1,
+		    memory_order_seq_cst);
+	}
 	new_e = old + 1;
-	atomic_store_explicit(&__rcu.epoch, new_e, memory_order_release);
+	/* F_W: the advance before the scan (see above). */
+	atomic_thread_fence(memory_order_seq_cst);
 
 	/* Wait for all readers active in epoch <= old to drain.
 	 * (Readers see the new epoch on their next read_lock.) */
@@ -599,15 +679,21 @@ xtc_rcu_synchronize(void)
 		}
 	}
 
-	/* Reclaim the bucket that's now safe.  An object retired at
-	 * epoch E sits in bucket (E % N).  By the time global epoch
-	 * has advanced to E+2, all readers that could see E have left,
-	 * so bucket (E % N) at epoch E+2 is recycle-safe. */
 	if (new_e < 2) return;
 	reclaim_bucket = (int)((new_e - 2) % XTC_RCU_NBUCKETS);
+	to_free = NULL;
 	(void)__xtc_mtx_lock(&__rcu.lock);
-	to_free = __rcu.buckets[reclaim_bucket];
-	__rcu.buckets[reclaim_bucket] = NULL;
+	pp = &__rcu.buckets[reclaim_bucket];
+	while ((r = *pp) != NULL) {
+		if (r->epoch + 2 <= new_e ||
+		    XTC_DST_BUG(XTC_DST_BUG_RCU_RECLAIM_ALIAS)) {
+			*pp = r->next;
+			r->next = to_free;
+			to_free = r;
+		} else {
+			pp = &r->next;
+		}
+	}
 	(void)__xtc_mtx_unlock(&__rcu.lock);
 
 	for (r = to_free; r != NULL; r = next) {

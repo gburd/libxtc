@@ -6,6 +6,65 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## FIXED (2.1.7): `xtc_rcu_synchronize` freed objects under readers
+
+**What it was.**  `xtc_rcu_synchronize` advanced the global epoch with a
+load and then a store.  Two threads calling it at once could both store
+E+1, so an advance was lost, and a thread preempted between the load and
+the store moved the epoch backwards.  Each grace period then waited on
+the wrong epoch, and an object retired since was freed while a reader
+still held it.  A second defect hid behind the first: the reclaim emptied
+the whole retirement bucket (epoch % 4).  While one caller waited out a
+long reader, others could advance the epoch four or more, and an object
+retired into that same bucket, still held by a newer reader, was freed
+with the bucket.  So a fetch-add alone does not fix it.  A third, in
+the memory ordering, affects even one writer: a reader published its
+epoch with a release store and then loaded the protected pointer, and a
+release store may be reordered after a later load (x86 does it, through
+its store buffer).  The writer's scan could miss a reader whose pointer
+load had already found the object the writer just retired.
+
+Every release since 0.1 is affected.  The first two need two or more
+`xtc_rcu_synchronize` calls in flight at once: from two or more
+threads, or from two or more fibers, on one loop or several (a fiber's
+call yields while it waits, so another fiber can call it meanwhile).
+A program that makes every call from one thread or one fiber, or that
+serializes its calls with its own mutex, is not exposed to them.  The
+third needs only a reader and a writer on different OS threads, even
+with a single writer, so every multi-threaded use is exposed, though
+the window is a few instructions wide.  libxtc
+itself never calls `xtc_rcu_synchronize` (`xtc_chash` and `xtc_cskip`
+leave it to the caller).
+
+**Fix.**  The epoch advances with a fetch-add, so each caller gets its
+own grace period, and every retirement is stamped with the epoch it was
+retired in.  A caller frees only the records two or more epochs older
+than its own advance, and leaves newer ones in the bucket for the caller
+whose grace period covers them.  A reader runs a sequentially
+consistent fence after it publishes its epoch, `xtc_rcu_retire` one
+before it reads the epoch, and `xtc_rcu_synchronize` one between its
+advance and its scan; the comment above `xtc_rcu_synchronize` gives the
+argument under the C11 model.  The fence costs the read side about 9 ns
+on x86-64 (a lock+unlock pair, measured on a 48-core host: 7.0 ns
+before, 16.0 ns after on one thread; 13.4 and 21.3 ns on each of 32).
+`test/m13/test_rcu`
+`/concurrent_synchronize` (8 threads, 20,000 calls each) rose by
+156,883 to 156,985 instead of 160,000 before and rises by exactly
+160,000 after.  `/concurrent_stress` (6 reader threads, 4 writer threads,
+3,000 swaps each, a poisoned free) saw 3,436 to 4,792 reads of a freed
+node per run before, 483 to 774 with a fetch-add but the old bucket
+reclaim, and 0 after.  At one writer, or four writers behind a mutex, it
+passed 40 of 40 runs before the fix.  `/publish_order` (a writer and a
+reader thread on two cores, 10,000,000 grace periods, a reader that saw
+the writer's old flag must not see the writer's done mark inside its read
+side) failed in 10 of 20 runs with only the reader's fence removed, and
+passes with it; with one writer on the old code (no fetch-add involved)
+a litmus of the same shape failed in 9 of 10 runs.  It is
+probabilistic, and the simulator, which runs one
+fiber at a time, cannot see this class.  `test_sim_rcu` runs the first two under
+DST: planted bugs 92 (load and store) and 93 (whole-bucket reclaim) are
+caught on both built-in seeds.
+
 ## FIXED (2.1.6): a custom deadlock-victim picker got node indices, not locker IDs
 
 `xtc_lock_victim_pick_fn` is documented as receiving the locker IDs of
