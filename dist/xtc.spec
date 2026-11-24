@@ -12,7 +12,7 @@
 %global sover 2
 
 Name:           libxtc
-Version:        2.1.6
+Version:        2.1.7
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,20 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Tue Nov 24 2026 Greg Burd <greg@burd.me> - 2.1.7-1
+  Security fix in xtc_rcu: a retired object could be freed while a
+  reader still held it (a use-after-free).  Exposed: any program with
+  two xtc_rcu_synchronize calls in flight at once, from threads or from
+  fibers on one loop or several, and any program with an xtc_rcu reader
+  and writer on different OS threads, even with a single writer.
+  Upgrade; no workaround covers the last case.  The outermost
+  xtc_rcu_read_lock now runs one full fence: about 9 ns more per
+  read-side pair on x86-64 and 1.4 ns on aarch64.  Accepted
+  performance regression: xtc_chash lookups and every outermost
+  xtc_rcu_read_lock cost one more fence: about +2.5 ns per chash get
+  on x86 (17.5 -> 20.0 ns), about +1.4 ns on aarch64.  xtc_supervisor(3)
+  now documents that xtc_sup_n_restarts counts the refused restart.
+
 * Mon Nov 23 2026 Greg Burd <greg@burd.me> - 2.1.6-1
   A custom deadlock-victim picker now receives the locker IDs of the
   cycle, as documented, not the detector's node indices.  An xtc_xproc

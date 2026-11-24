@@ -1,3 +1,46 @@
+libxtc (2.1.7-1) unstable; urgency=high
+
+  * PATCH release on the 2.1 LTS line: fixes only.  ABI-compatible with
+    2.0.0 and 2.1.0 to 2.1.6 (abidiff against 2.1.6: no change; the
+    same exported symbols; SONAME libxtc.so.2).
+  * SECURITY (xtc_rcu, use-after-free): xtc_rcu_synchronize could free
+    a retired object while a reader still held it.  Every release since
+    0.1 is affected.  Three defects:
+    - lost advances: the epoch advanced with a load and a store, so two
+      calls at once could both advance it by one, or move it backwards;
+    - bucket aliasing: a reclaim emptied a whole retirement bucket,
+      including objects retired since by readers it never waited for;
+    - missing fences: a reader's epoch publish could be reordered after
+      its pointer load (x86 does it), so the writer's scan missed it.
+  * Who is exposed: to the first two, any program with two or more
+    xtc_rcu_synchronize calls in flight at once, from threads or from
+    fibers on one loop or several (a fiber's call yields while it
+    waits).  To the third, any program with an xtc_rcu reader and a
+    writer on different OS threads, even with a single writer.  libxtc
+    itself never calls xtc_rcu_synchronize; xtc_chash and xtc_cskip
+    leave it to the caller.
+  * What to do: upgrade.  Serializing the xtc_rcu_synchronize calls
+    with a mutex avoids the first two defects only; no workaround
+    covers the third.
+  * Fix: the epoch advances with a fetch-add, each retirement records
+    its epoch and is freed only by a grace period that covers it, and
+    three sequentially consistent fences order the read side, retire
+    and synchronize.  Read-side cost: one fence per outermost
+    xtc_rcu_read_lock, about +9 ns per lock+unlock pair on x86-64
+    (7.0 to 16.0 ns on one thread) and +1.4 ns on aarch64; nested
+    calls and xtc_rcu_read_unlock are unchanged.  New tests
+    /m13/rcu/concurrent_synchronize, /concurrent_stress and
+    /publish_order, and DST planted bugs 92 and 93.
+  * Accepted performance regression (perf-gate cell micro_chash_get):
+    xtc_chash lookups and every outermost xtc_rcu_read_lock cost one
+    more fence: about +2.5 ns per chash get on x86 (17.5 -> 20.0 ns),
+    about +1.4 ns on aarch64.
+  * docs: xtc_supervisor(3) and xtc_orc.h say that xtc_sup_n_restarts
+    counts the restart decision that exceeds the restart intensity, so
+    it reads max_restarts + 1 after a give-up; the OTP test asserts it.
+
+ -- Greg Burd <greg@burd.me>  Tue, 24 Nov 2026 12:00:00 -0500
+
 libxtc (2.1.6-1) unstable; urgency=medium
 
   * PATCH release on the 2.1 LTS line: fixes only.  ABI-compatible with

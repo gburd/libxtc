@@ -36,6 +36,10 @@ the window is a few instructions wide.  libxtc
 itself never calls `xtc_rcu_synchronize` (`xtc_chash` and `xtc_cskip`
 leave it to the caller).
 
+**What to do.**  Upgrade to 2.1.7.  Serializing every
+`xtc_rcu_synchronize` call behind one mutex avoids the first two
+defects on older releases, but no workaround covers the third.
+
 **Fix.**  The epoch advances with a fetch-add, so each caller gets its
 own grace period, and every retirement is stamped with the epoch it was
 retired in.  A caller frees only the records two or more epochs older
@@ -46,7 +50,12 @@ before it reads the epoch, and `xtc_rcu_synchronize` one between its
 advance and its scan; the comment above `xtc_rcu_synchronize` gives the
 argument under the C11 model.  The fence costs the read side about 9 ns
 on x86-64 (a lock+unlock pair, measured on a 48-core host: 7.0 ns
-before, 16.0 ns after on one thread; 13.4 and 21.3 ns on each of 32).
+before, 16.0 ns after on one thread; 13.4 and 21.3 ns on each of 32),
+and about 1.4 ns on aarch64 (12.4 to 13.8 ns).  It is the one
+performance regression 2.1.7 accepts: `xtc_chash` lookups and every
+outermost `xtc_rcu_read_lock` cost one more fence, about +2.5 ns per
+chash get on x86 (17.5 -> 20.0 ns, the perf-gate cell
+`micro_chash_get` against 2.1.6), about +1.4 ns on aarch64.
 `test/m13/test_rcu`
 `/concurrent_synchronize` (8 threads, 20,000 calls each) rose by
 156,883 to 156,985 instead of 160,000 before and rises by exactly
@@ -60,8 +69,11 @@ the writer's old flag must not see the writer's done mark inside its read
 side) failed in 10 of 20 runs with only the reader's fence removed, and
 passes with it; with one writer on the old code (no fetch-add involved)
 a litmus of the same shape failed in 9 of 10 runs.  It is
-probabilistic, and the simulator, which runs one
-fiber at a time, cannot see this class.  `test_sim_rcu` runs the first two under
+probabilistic and x86 evidence alone: the test does not catch the
+missing fence on aarch64 (ARMv8 orders a release store before a later
+acquire load), and on riscv64 only rarely (1 run in 20 with a 100x
+longer reader window); the argument is the guarantee.  The simulator,
+which runs one fiber at a time, cannot see this class.  `test_sim_rcu` runs the first two under
 DST: planted bugs 92 (load and store) and 93 (whole-bucket reclaim) are
 caught on both built-in seeds.
 
