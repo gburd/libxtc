@@ -535,11 +535,11 @@ test_hanging_restart_loop(const MunitParameter p[], void *d)
 
 	munit_assert_int(xtc_sup_alive(sup), ==, 0);
 	n_restarts = xtc_sup_n_restarts(sup);
-	/* Bounded: at most max_restarts + a small slack for race. */
-	munit_assert_int(n_restarts, <=, opts.max_restarts + 2);
-	munit_assert_int(atomic_load(&g_quick_exit_count), >=, 1);
-	munit_assert_int(atomic_load(&g_quick_exit_count), <=,
-	    opts.max_restarts + 3);
+	/* The child ran max_restarts + 1 times; the count includes the
+	 * refused restart that ended the supervisor (xtc_supervisor(3)). */
+	munit_assert_int(n_restarts, ==, opts.max_restarts + 1);
+	munit_assert_int(atomic_load(&g_quick_exit_count), ==,
+	    opts.max_restarts + 1);
 	munit_assert_int(xtc_sup_join(sup, 1000LL * 1000 * 1000), ==, XTC_OK);
 	(void)xtc_loop_fini(loop);
 	return MUNIT_OK;

@@ -140,6 +140,13 @@ is removed from the supervisor and no longer counted (before 1.55.1 its
 slot was kept forever);
 .Fn xtc_sup_n_alive
 returns only the currently-live children (pool utilization).
+.Fn xtc_sup_n_restarts
+counts the supervisor's restart decisions, including the one that
+exceeds the restart intensity and makes it give up, although that one
+starts nothing: after a give-up it reads one more than the restarts
+that ran
+.Pq Va opts.max_restarts No + 1 No within the period .
+Subtract one after a give-up to count restarts performed.
 .Pp
 .Fn xtc_sup_start
 spawns the supervisor and its initial children.  Returns

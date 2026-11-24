@@ -143,6 +143,8 @@ XTC_API int xtc_sup_join(xtc_supervisor_t *sup, int64_t timeout_ns);
 
 XTC_API int  xtc_sup_n_children(const xtc_supervisor_t *sup);
 XTC_API int  xtc_sup_n_alive(const xtc_supervisor_t *sup);
+/* Restart decisions, including the refused one that ends a supervisor
+ * that gives up: after a give-up, opts.max_restarts + 1 in the period. */
 XTC_API int  xtc_sup_n_restarts(const xtc_supervisor_t *sup);
 XTC_API int  xtc_sup_alive(const xtc_supervisor_t *sup);
 
