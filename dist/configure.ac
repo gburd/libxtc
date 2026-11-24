@@ -573,15 +573,33 @@ case "$xtc_tls" in
   openssl|libressl)
     # Explicit request -- fail loudly if not present.  The two share
     # an ABI; we keep both names so users can document which they
-    # actually built against.
+    # actually built against.  When the header is not on the default
+    # include path (Nix keeps it in a separate -dev output, a custom
+    # prefix), take the flags from pkg-config's openssl module, as the
+    # boringssl branch does.
+    AC_CHECK_HEADER([openssl/ssl.h], [ac_have_ssl_hdr=yes],
+      [ac_have_ssl_hdr=no])
+    AS_IF([test "x$ac_have_ssl_hdr" = xno && test "x$PKG_CONFIG" != xno &&
+           $PKG_CONFIG --exists openssl 2>/dev/null],
+      [XTC_TLS_CFLAGS=`$PKG_CONFIG --cflags openssl`
+       XTC_TLS_LIBS=`$PKG_CONFIG --libs openssl`
+       ac_save_CPPFLAGS=$CPPFLAGS
+       CPPFLAGS="$CPPFLAGS $XTC_TLS_CFLAGS"
+       AS_UNSET([ac_cv_header_openssl_ssl_h])
+       AC_CHECK_HEADER([openssl/ssl.h], [ac_have_ssl_hdr=yes], [])
+       CPPFLAGS=$ac_save_CPPFLAGS])
+    AS_IF([test "x$ac_have_ssl_hdr" = xno],
+      [AC_MSG_ERROR([--with-tls=$xtc_tls: openssl/ssl.h not found (nor through pkg-config openssl)])])
+    AS_IF([test -z "$XTC_TLS_LIBS"], [XTC_TLS_LIBS="-lssl -lcrypto"])
     ac_save_LIBS=$LIBS
-    AC_CHECK_LIB([ssl], [SSL_CTX_new], [],
-      [AC_MSG_ERROR([--with-tls=$xtc_tls: libssl not found])], [-lcrypto])
+    LIBS="$XTC_TLS_LIBS $LIBS"
+    AC_MSG_CHECKING([for SSL_CTX_new with $XTC_TLS_LIBS])
+    AC_LINK_IFELSE([AC_LANG_CALL([], [SSL_CTX_new])],
+      [AC_MSG_RESULT([yes])],
+      [AC_MSG_RESULT([no])
+       AC_MSG_ERROR([--with-tls=$xtc_tls: libssl not found])])
     LIBS=$ac_save_LIBS
-    AC_CHECK_HEADER([openssl/ssl.h], [],
-      [AC_MSG_ERROR([--with-tls=$xtc_tls: openssl/ssl.h not found])])
     xtc_tls_backend=openssl
-    XTC_TLS_LIBS="-lssl -lcrypto"
     AS_IF([test "x$xtc_tls" = xlibressl],
       [xtc_tls_flavor=libressl], [xtc_tls_flavor=openssl])
     ;;

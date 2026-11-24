@@ -5489,17 +5489,48 @@ fi
   openssl|libressl)
     # Explicit request -- fail loudly if not present.  The two share
     # an ABI; we keep both names so users can document which they
-    # actually built against.
-    ac_save_LIBS=$LIBS
-    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for SSL_CTX_new in -lssl" >&5
-printf %s "checking for SSL_CTX_new in -lssl... " >&6; }
-if test ${ac_cv_lib_ssl_SSL_CTX_new+y}
+    # actually built against.  When the header is not on the default
+    # include path (Nix keeps it in a separate -dev output, a custom
+    # prefix), take the flags from pkg-config's openssl module, as the
+    # boringssl branch does.
+    ac_fn_c_check_header_compile "$LINENO" "openssl/ssl.h" "ac_cv_header_openssl_ssl_h" "$ac_includes_default"
+if test "x$ac_cv_header_openssl_ssl_h" = xyes
 then :
-  printf %s "(cached) " >&6
+  ac_have_ssl_hdr=yes
 else case e in #(
-  e) ac_check_lib_save_LIBS=$LIBS
-LIBS="-lssl -lcrypto $LIBS"
-cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+  e) ac_have_ssl_hdr=no ;;
+esac
+fi
+
+    if test "x$ac_have_ssl_hdr" = xno && test "x$PKG_CONFIG" != xno &&
+           $PKG_CONFIG --exists openssl 2>/dev/null
+then :
+  XTC_TLS_CFLAGS=`$PKG_CONFIG --cflags openssl`
+       XTC_TLS_LIBS=`$PKG_CONFIG --libs openssl`
+       ac_save_CPPFLAGS=$CPPFLAGS
+       CPPFLAGS="$CPPFLAGS $XTC_TLS_CFLAGS"
+       { ac_cv_header_openssl_ssl_h=; unset ac_cv_header_openssl_ssl_h;}
+       ac_fn_c_check_header_compile "$LINENO" "openssl/ssl.h" "ac_cv_header_openssl_ssl_h" "$ac_includes_default"
+if test "x$ac_cv_header_openssl_ssl_h" = xyes
+then :
+  ac_have_ssl_hdr=yes
+fi
+
+       CPPFLAGS=$ac_save_CPPFLAGS
+fi
+    if test "x$ac_have_ssl_hdr" = xno
+then :
+  as_fn_error $? "--with-tls=$xtc_tls: openssl/ssl.h not found (nor through pkg-config openssl)" "$LINENO" 5
+fi
+    if test -z "$XTC_TLS_LIBS"
+then :
+  XTC_TLS_LIBS="-lssl -lcrypto"
+fi
+    ac_save_LIBS=$LIBS
+    LIBS="$XTC_TLS_LIBS $LIBS"
+    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for SSL_CTX_new with $XTC_TLS_LIBS" >&5
+printf %s "checking for SSL_CTX_new with $XTC_TLS_LIBS... " >&6; }
+    cat confdefs.h - <<_ACEOF >conftest.$ac_ext
 /* end confdefs.h.  */
 
 /* Override any GCC internal prototype to avoid an error.
@@ -5522,41 +5553,18 @@ return SSL_CTX_new ();
 _ACEOF
 if ac_fn_c_try_link "$LINENO"
 then :
-  ac_cv_lib_ssl_SSL_CTX_new=yes
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: yes" >&5
+printf "%s\n" "yes" >&6; }
 else case e in #(
-  e) ac_cv_lib_ssl_SSL_CTX_new=no ;;
+  e) { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: no" >&5
+printf "%s\n" "no" >&6; }
+       as_fn_error $? "--with-tls=$xtc_tls: libssl not found" "$LINENO" 5 ;;
 esac
 fi
 rm -f core conftest.err conftest.$ac_objext conftest.beam \
     conftest$ac_exeext conftest.$ac_ext
-LIBS=$ac_check_lib_save_LIBS ;;
-esac
-fi
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_ssl_SSL_CTX_new" >&5
-printf "%s\n" "$ac_cv_lib_ssl_SSL_CTX_new" >&6; }
-if test "x$ac_cv_lib_ssl_SSL_CTX_new" = xyes
-then :
-  printf "%s\n" "#define HAVE_LIBSSL 1" >>confdefs.h
-
-  LIBS="-lssl $LIBS"
-
-else case e in #(
-  e) as_fn_error $? "--with-tls=$xtc_tls: libssl not found" "$LINENO" 5 ;;
-esac
-fi
-
     LIBS=$ac_save_LIBS
-    ac_fn_c_check_header_compile "$LINENO" "openssl/ssl.h" "ac_cv_header_openssl_ssl_h" "$ac_includes_default"
-if test "x$ac_cv_header_openssl_ssl_h" = xyes
-then :
-
-else case e in #(
-  e) as_fn_error $? "--with-tls=$xtc_tls: openssl/ssl.h not found" "$LINENO" 5 ;;
-esac
-fi
-
     xtc_tls_backend=openssl
-    XTC_TLS_LIBS="-lssl -lcrypto"
     if test "x$xtc_tls" = xlibressl
 then :
   xtc_tls_flavor=libressl

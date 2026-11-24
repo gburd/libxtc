@@ -89,7 +89,10 @@ int  xtc_tls_shutdown(xtc_tls_t *tls);
 `configure --with-tls=BACKEND` picks the backend at compile time.
 Default: `auto`, which tries OpenSSL first, BoringSSL, then disables
 TLS if neither is available.  No runtime selection -- same discipline
-as `xtc_io` backends.
+as `xtc_io` backends.  An explicit `--with-tls=openssl` (or `libressl`)
+whose header is not on the default include path takes the flags from
+`pkg-config openssl`, as on Nix, where the headers sit in a separate
+`-dev` output.
 
 ```sh
 ./configure --with-tls=openssl    # default
