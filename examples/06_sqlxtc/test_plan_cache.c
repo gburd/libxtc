@@ -133,6 +133,12 @@ main(void)
 	CK(vx_plan_build_count() - b0 == 2);
 	sx_bind_null(q, 1); sx_bind_int64(q, 2, 2);         /* NULL: no row */
 	CK(drain(q, NULL) == 0);
+	/* Rebinding a TEXT or BLOB slot with no reset between frees the old
+	 * bytes (LSan reports the leak otherwise); the last bind wins. */
+	sx_bind_text(q, 1, "x", -1); sx_bind_text(q, 1, "y", -1);
+	sx_bind_blob(q, 1, "zz", 2); sx_bind_blob(q, 1, "zz", 2);
+	sx_bind_int64(q, 1, 9); sx_bind_int64(q, 2, 2);
+	CK(drain(q, &first) == 1 && first == 2);
 
 	/* DDL invalidates: a new index on c is used by the re-built plan. */
 	sx_finalize(q); q = NULL;
@@ -156,6 +162,7 @@ main(void)
 	CK(n <= 31);                                        /* the index */
 
 	/* Writes run from the cached AST: no parse per execution. */
+	sx_finalize(w);
 	p0 = sql_parse_count();
 	CK(sx_prepare(db, "UPDATE t SET c = ? WHERE a = ? AND b = ?", -1, &w,
 	    NULL) == SX_OK);
