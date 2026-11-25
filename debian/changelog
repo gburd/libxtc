@@ -1,3 +1,85 @@
+libxtc (2.1.8-1) unstable; urgency=medium
+
+  * PATCH release on the 2.1 LTS line: fixes only.  ABI-compatible with
+    2.0.0 and 2.1.0 to 2.1.7 (abidiff against 2.1.7: no change; the
+    same exported symbols; SONAME libxtc.so.2).
+  * xtc_rcu: a fiber that died inside a read side held every grace
+    period open.  A proc killed (xtc_exit_pid), exited (xtc_exit_self),
+    or faulted inside xtc_rcu_read_lock unwound past its unlock, and
+    xtc_loop_fini freed parked fibers without their reader slots, so
+    every later xtc_rcu_synchronize in the process waited forever; a
+    recycled task inherited the open read side.  Every release with
+    fiber reader slots, through 2.1.7.  The loop now ends such a
+    fiber's read side when it finishes and when its loop is
+    finalized; a stopped but live loop keeps its fibers' read sides.
+    xtc_rcu(3) now also says that a proc that recovers from a
+    contained fault and carries on keeps its read side, and that an
+    xtc_proc_at_exit callback of a proc that exited inside a read side
+    must not synchronize.
+  * fork and the blocking pool.  A forked child has only the forking
+    thread, but it inherited the pool's state: the started flag, the
+    idle count, the queue, and the parent's in-flight offloads.  So:
+    - since 2.1.3, a child that finalized an inherited loop while one
+      of its fibers was parked in xtc_blocking_run (xtc_loop_fini,
+      xtc_exec_fini, xtc_app_destroy) waited forever for the parent's
+      offload;
+    - in every release with the pool, a child's xtc_blocking_run hung
+      when the parent had started the pool (its item was queued behind
+      idle threads that the child does not have), and its
+      xtc_blocking_shutdown crashed (SIGSEGV, joining the parent's
+      thread ids) once the parent had three or more pool threads.
+  * Now a child starts with an empty pool and keeps the configured
+    size: its first offload starts its own threads, and
+    xtc_blocking_shutdown stops only those.  Offloads in flight or
+    queued at the fork stay the parent's and never run or complete in
+    the child: a fiber of an inherited loop parked in xtc_blocking_run
+    stays parked there, finalizing that loop does not wait for it, and
+    an inherited xtc_blocking_submit item is dropped.  New tests
+    /m9/blocking/loop_fini_fork, /fork_own, /fork_run_started,
+    /fork_run_cold, /fork_shutdown, /fork_race, and /fork_race_done.
+  * The pool registers a pthread_atfork child handler when the library
+    is loaded, so it runs in every child, even one forked before the
+    first offload.  It re-initializes the pool's locks and condition
+    variables, so a lock another thread held at the fork cannot hang
+    the child.  There is no prepare or parent handler: the parent runs
+    nothing of the pool's at a fork and never waits for a thread
+    inside the pool lock.  (A prepare handler that took the pool lock
+    would deadlock the parent against an allocator whose fork handlers
+    were registered after libxtc's.)  If the registration fails at
+    load, every offload returns XTC_E_RESOURCE.  On FreeBSD the shared
+    library is linked with -z nodelete: there a dlclosed library's
+    fork handlers are not dropped when the program did not link libthr
+    itself, and the next fork would crash.
+  * configure: an explicit --with-tls=openssl (or libressl) takes the
+    flags and the libraries from pkg-config openssl when the header or
+    the library is not on the default path (Nix keeps the headers in a
+    separate -dev output).  The default path is unchanged.
+  * illumos: the shell gates use POSIX ERE word boundaries, read nm's
+    POSIX format, find debug info with strings, and read the process
+    state with ps -o s; make check passes there in full.  No library
+    change.
+  * test_batch: it did not compile off Linux with --enable-sched-policy
+    (unistd.h was included only on Linux; since 1.56.0), and on Linux
+    a build with --with-accel=no --enable-sched-policy aborted in its
+    FENCE case, which needs the accelerator wait.  Test only.
+  * xtc_accel(3): the fence wait is mail-blind; it no longer says that
+    pending mail turns it into a 50 microsecond poll (stale since
+    2.1.3).  Documentation only.
+  * examples/06_sqlxtc: sx_clear_bindings left a cleared TEXT or BLOB
+    slot typed with its old length, so a later run copied from NULL
+    (crash); rebinding a TEXT or BLOB slot leaked the old bytes; the
+    nested-loop join read ord[-1] when it ended.
+  * Accepted performance result (perf-gate cell exec_spawn_8): one of
+    two runs against 2.1.7 measured -13.5% (1.40e7 -> 1.21e7 tasks/s),
+    the other -2.8% within the ranges.  It is code alignment, not the
+    cost of a change: blocking.c's changed code moves every function on
+    the spawn path 32 bytes, and 2.1.7 itself linked with the same
+    32-byte shift loses 13.5%; with the shift undone, 2.1.8 is within
+    4.2% of 2.1.7.  The spawn path gains one branch, the dead-fiber
+    check, which a separate A/B measured and ruled out as the cause.
+
+ -- Greg Burd <greg@burd.me>  Wed, 25 Nov 2026 12:00:00 -0500
+
 libxtc (2.1.7-1) unstable; urgency=high
 
   * PATCH release on the 2.1 LTS line: fixes only.  ABI-compatible with

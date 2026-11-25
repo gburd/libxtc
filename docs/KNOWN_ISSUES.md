@@ -34,6 +34,54 @@ the read side of a proc that exits ends after its `xtc_proc_at_exit`
 callbacks run, so a callback of a proc that exited inside a read side
 must not call `xtc_rcu_synchronize`: it waits for itself forever.
 
+## FIXED (2.1.8): a forked child hung or crashed in the blocking pool
+
+**What it was.**  A child made by `fork` has only the forking thread,
+but it inherited the pool's whole state: the started flag, the idle
+count, the queue, and the list of fibers parked in `xtc_blocking_run`.
+Three symptoms followed.  Since 2.1.3, a child that finalized an
+inherited loop (`xtc_loop_fini`, so also `xtc_exec_fini` and
+`xtc_app_destroy`) while a fiber of that loop was parked in
+`xtc_blocking_run` waited forever for an offload that only the parent's
+threads could finish.  In every release with the pool, a child's own
+`xtc_blocking_run` hung once the parent had started the pool (the item
+was queued behind idle threads the child does not have), and a child's
+`xtc_blocking_shutdown` crashed in `pthread_join` on the parent's thread
+ids once the parent had three or more pool threads.  A fork could also
+copy a pool lock held by a parent thread, and the child then hung on
+its first use of the pool.
+
+**What to do.**  Upgrade to 2.1.8.  On older releases, a child that
+must not hang can avoid the pool (no `xtc_blocking_*` call, no
+finalizing an inherited loop) and leave with `_exit` or `exec`.
+
+**Fix.**  A `pthread_atfork` child handler, registered when the
+library is loaded, re-initializes the pool's locks and condition
+variables in the child and gives it an empty pool that keeps the
+configured size: the child's first offload starts its own threads, and
+`xtc_blocking_shutdown` there stops only those.  Offloads in flight or
+queued at the fork are the parent's, and the child never runs or
+completes them: a fiber of an inherited loop parked in
+`xtc_blocking_run` stays parked, finalizing that loop no longer waits
+for it, and an inherited `xtc_blocking_submit` item is dropped.  There
+is no prepare or parent handler, so the parent runs nothing of the
+pool's at a fork, takes no lock, and never waits for a thread inside
+the pool.  A prepare handler that took the pool lock would deadlock
+the parent inside `fork` against an allocator whose fork handlers were
+registered after libxtc's (handlers run newest first, and the pool
+allocates while it holds its lock).  On FreeBSD the shared library is
+linked with `-z nodelete`: there a `dlclose`d library's fork handlers
+are not dropped when the program did not link libthr itself, and the
+next fork would call into unmapped code.  `test/m9/test_blocking`
+`/loop_fini_fork`, `/fork_own`, `/fork_run_started`, `/fork_shutdown`,
+`/fork_race` (200 forks while another thread takes the pool lock,
+before any offload), and `/fork_race_done` (200 forks while two
+threads wait for offloads off the loop) fail on 2.1.7 (the child dies
+of its 5 s alarm, or of SIGSEGV in the shutdown case) and pass on
+2.1.8; `/fork_run_cold` passes on both.  With the handler registered at the first offload
+instead of at load, `/fork_race` still hangs a child within the first
+few forks.
+
 ## FIXED (2.1.7): `xtc_rcu_synchronize` freed objects under readers
 
 **What it was.**  `xtc_rcu_synchronize` advanced the global epoch with a

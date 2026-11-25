@@ -12,7 +12,7 @@
 %global sover 2
 
 Name:           libxtc
-Version:        2.1.7
+Version:        2.1.8
 Release:        1%{?dist}
 Summary:        High-performance async/concurrency runtime for C
 
@@ -82,6 +82,31 @@ make check
 %{_mandir}/man7/*.7*
 
 %changelog
+* Wed Nov 25 2026 Greg Burd <greg@burd.me> - 2.1.8-1
+  xtc_rcu: a fiber that died inside a read side (killed, exited,
+  faulted, or parked when its loop was finalized) held every later
+  xtc_rcu_synchronize forever, through 2.1.7; its read side now ends
+  when the fiber finishes or its loop is finalized.
+  A forked child can use the blocking pool.  Before, a child that
+  finalized an inherited loop with a fiber parked in xtc_blocking_run
+  hung forever (since 2.1.3); a child's xtc_blocking_run hung once the
+  parent had started the pool, and its xtc_blocking_shutdown crashed
+  once the parent had three or more pool threads (every release with
+  the pool).  The child now starts with an empty pool of its own and
+  fresh pool locks; the parent's in-flight offloads never run or
+  complete in it.  The child-only fork handler is registered at load,
+  so every child runs it; the parent runs nothing of the pool's at a
+  fork.  On FreeBSD libxtc.so is linked -z nodelete.  Also: configure
+  takes OpenSSL's flags from pkg-config when an explicit
+  --with-tls=openssl does not find them; illumos test portability;
+  test_batch builds on illumos with --enable-sched-policy and passes
+  with --with-accel=no; xtc_accel(3) describes the mail-blind fence
+  wait; three sqlxtc example fixes (a crash, an out-of-bounds read, a
+  leak).
+  Accepted perf-gate result: exec_spawn_8 measured -13.5% in one of two
+  runs; a code-alignment effect (2.1.7 with the same 32-byte shift loses
+  13.5%); the spawn path's one new branch was measured and ruled out.
+
 * Tue Nov 24 2026 Greg Burd <greg@burd.me> - 2.1.7-1
   Security fix in xtc_rcu: a retired object could be freed while a
   reader still held it (a use-after-free).  Exposed: any program with
