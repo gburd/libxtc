@@ -2118,6 +2118,10 @@ sx_reset(sx_stmt *st)
 #endif
 	return SX_OK;
 }
+#ifdef SQLXTC_HAVE_LIME
+static void bind_slot_release(sx_stmt *st, int idx);
+#endif
+
 int
 sx_clear_bindings(sx_stmt *st)
 {
@@ -2125,12 +2129,13 @@ sx_clear_bindings(sx_stmt *st)
 #ifdef SQLXTC_HAVE_LIME
 	if (st->native) {
 		int i;
-		for (i = 0; i < st->nbind; i++)
-			if ((st->binds[i].type == VX_TEXT || st->binds[i].type == VX_BLOB) &&
-			    st->binds[i].bytes != NULL) {
-				free((void *)st->binds[i].bytes);
-				st->binds[i].bytes = NULL;
-			}
+		/* Every slot becomes NULL, as in SQLite: a later bind of a
+		 * higher slot raises nbind past these again. */
+		for (i = 0; i < st->nbind; i++) {
+			bind_slot_release(st, i + 1);
+			st->binds[i].type = VX_NULL;
+			st->binds[i].nbytes = 0;
+		}
 		st->nbind = 0;
 		return SX_OK;
 	}

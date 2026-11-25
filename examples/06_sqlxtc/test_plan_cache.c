@@ -139,6 +139,14 @@ main(void)
 	sx_bind_blob(q, 1, "zz", 2); sx_bind_blob(q, 1, "zz", 2);
 	sx_bind_int64(q, 1, 9); sx_bind_int64(q, 2, 2);
 	CK(drain(q, &first) == 1 && first == 2);
+	/* sx_clear_bindings makes every slot NULL, as SQLite does: binding
+	 * only slot 2 afterwards leaves slot 1 NULL (no row), not a freed
+	 * TEXT. */
+	sx_bind_text(q, 1, "9", -1); sx_bind_int64(q, 2, 2);
+	CK(drain(q, &first) == 1 && first == 2);
+	sx_clear_bindings(q);
+	sx_bind_int64(q, 2, 2);
+	CK(drain(q, NULL) == 0);
 
 	/* DDL invalidates: a new index on c is used by the re-built plan. */
 	sx_finalize(q); q = NULL;
