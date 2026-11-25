@@ -34,6 +34,21 @@
  *	(__xtc_blocking_loop_fini) until no item on g_fly belongs to the
  *	loop: the worker would otherwise write w and wake a freed task, and
  *	fn's argument usually lives in the same freed frame.
+ *
+ *	fork.  Only the forking thread survives in the child, so a child
+ *	has none of the pool's threads, and one of them may have held
+ *	g_lock or g_done_lock at the fork.  The fork handlers (registered
+ *	before the first item can be linked or queued) take both locks in
+ *	prepare and release them after, and the child starts with an empty
+ *	pool: nothing started, nothing queued, nothing on g_fly, and the
+ *	user's thread count kept.  The child's next offload starts its own
+ *	threads.  The items the child drops are never run or completed
+ *	there: a queued or in-flight fiber item belongs to a fiber of the
+ *	parent's loops, so the child's copy of that fiber stays parked (and
+ *	its loop fini no longer waits for it), and a queued
+ *	xtc_blocking_submit item is leaked.  Note that a fork that races
+ *	the registration itself (the first offload of the process) is not
+ *	covered: the child can inherit g_lock held.
  */
 
 #include "xtc_int.h"
@@ -103,6 +118,74 @@ blk_auto_size(void)
 	if (n < 4) n = 4;                 /* floor */
 	if (n > BLK_MAX_THREADS) n = BLK_MAX_THREADS;
 	return n;
+}
+
+#if !defined(_WIN32)
+static _Atomic int g_atfork; /* fork handlers registered; set under g_lock */
+
+/* fork prepare and parent (see the file comment).  Raw pthread calls:
+ * these run inside fork(), not on a fiber.  No path holds both locks,
+ * so the order is free; it is g_lock, then g_done_lock. */
+static void
+blk_atfork_prepare(void)
+{
+	(void)pthread_mutex_lock(&g_lock);
+	(void)pthread_mutex_lock(&g_done_lock);
+}
+
+static void
+blk_atfork_parent(void)
+{
+	(void)pthread_mutex_unlock(&g_done_lock);
+	(void)pthread_mutex_unlock(&g_lock);
+}
+
+/* fork child: the pool's threads are gone; forget the pool and its items. */
+static void
+blk_atfork_child(void)
+{
+	g_started = 0;
+	g_nstarted = 0;
+	g_idle = 0;
+	g_stopping = 0;
+	g_head = NULL;
+	g_tail = NULL;
+	g_qlen = 0;
+	g_fly = NULL;
+	g_fly_waiters = 0;
+	(void)pthread_cond_init(&g_cv, NULL);
+	(void)pthread_cond_init(&g_done_cv, NULL);
+	blk_atfork_parent();
+}
+#endif
+
+/*
+ * Register the fork handlers once, before the first item is linked on
+ * g_fly or queued, so no fork can copy an item without the child reset.
+ * XTC_OK, or XTC_E_RESOURCE if they could not be registered.
+ */
+static int
+blk_atfork_init(void)
+{
+#if defined(_WIN32)
+	return XTC_OK; /* no fork */
+#else
+	int rc = XTC_OK;
+
+	if (atomic_load_explicit(&g_atfork, memory_order_acquire))
+		return XTC_OK;
+	(void)__xtc_mtx_lock(&g_lock);
+	if (!atomic_load_explicit(&g_atfork, memory_order_relaxed)) {
+		if (pthread_atfork(blk_atfork_prepare, blk_atfork_parent,
+		    blk_atfork_child) == 0)
+			atomic_store_explicit(&g_atfork, 1,
+			    memory_order_release);
+		else
+			rc = XTC_E_RESOURCE;
+	}
+	(void)__xtc_mtx_unlock(&g_lock);
+	return rc;
+#endif
 }
 
 /* Link / unlink a fiber caller's item on g_fly.  g_done_lock held. */
@@ -273,6 +356,8 @@ xtc_blocking_pool_size(int nthreads)
 static int
 blk_enqueue(struct blk_work *w)
 {
+	if (blk_atfork_init() != XTC_OK)
+		return XTC_E_RESOURCE;
 	(void)__xtc_mtx_lock(&g_lock);
 	if (blk_start_locked() != 0) {
 		(void)__xtc_mtx_unlock(&g_lock);
@@ -338,6 +423,8 @@ xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result)
 	w.fiber = 1;
 	w.detached = 0;        /* synchronous: the caller owns w and waits */
 	(void)xtc_task_waker(cur, &w.waker);
+	if ((rc = blk_atfork_init()) != XTC_OK)
+		return rc;
 
 	/*
 	 * CANCELLATION: the whole window from enqueue to completion is
@@ -510,7 +597,8 @@ xtc_blocking_submit(int (*fn)(void *), void *arg)
  * `loop` is parked in xtc_blocking_run, so the pool never writes into
  * a freed fiber frame or wakes a freed task.  A fiber belongs to the
  * loop when it is its home loop or the loop its waker names (a stolen
- * fiber).  Waits as long as fn runs; a queued fn is run first.
+ * fiber).  Waits as long as fn runs; a queued fn is run first.  In a
+ * forked child g_fly holds only the child's own items (see fork, above).
  */
 void
 __xtc_blocking_loop_fini(xtc_loop_t *loop)

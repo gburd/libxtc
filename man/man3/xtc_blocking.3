@@ -156,6 +156,23 @@ take as long as the longest offload of its loop; nothing is cancelled,
 and
 .Fn xtc_blocking_shutdown
 is not needed first.
+.Pp
+A child made by
+.Xr fork 2
+starts with an empty pool: it has none of the parent's pool threads,
+so the pool forgets them and keeps only the configured size.
+The child's first offload starts its own threads, and
+.Fn xtc_blocking_shutdown
+in the child stops only those.
+Offloads in flight or queued at the fork are the parent's, and the
+child never runs or completes them: a process of an inherited loop
+that was parked in
+.Fn xtc_blocking_run
+stays parked there, so finalizing that loop in the child does not wait
+for it, and an inherited
+.Fn xtc_blocking_submit
+item is dropped without running.
+There is no fork on Windows.
 .Sh RETURN VALUES
 .Fn xtc_blocking_run
 and
@@ -186,7 +203,8 @@ bounded so that a burst the pool cannot drain becomes an error the
 caller sees instead of unbounded backlog; back off and retry, or shed
 the request.
 .It Dv XTC_E_RESOURCE
-No pool thread could be started.
+The pool could not be started: no pool thread could be created, or its
+fork handlers could not be registered.
 .It Dv XTC_E_NOMEM
 .Fn ( xtc_blocking_submit
 only) the work item could not be allocated.

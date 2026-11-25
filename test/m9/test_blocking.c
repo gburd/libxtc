@@ -23,6 +23,8 @@
 #include <fcntl.h>
 #if !defined(_WIN32)
 #include <sys/resource.h>
+#include <sys/wait.h>
+#include <signal.h>
 #endif
 
 #include "munit.h"
@@ -241,11 +243,13 @@ test_file_offload(const MunitParameter p[], void *d)
  * the wake landed in freed memory (ASan: heap-use-after-free in
  * xtc_waker_wake), and xtc_loop_fini returned with fn still running. */
 static _Atomic int g_fini_fn_done;
+static _Atomic int g_fini_fn_in;
 
 static int
 fini_slow_fn(void *arg)
 {
 	struct timespec ts = { 0, 200 * 1000000L };
+	atomic_store_explicit(&g_fini_fn_in, 1, memory_order_seq_cst);
 	(void)nanosleep(&ts, NULL);
 	*(volatile int *)arg = 42;
 	atomic_store_explicit(&g_fini_fn_done, 1, memory_order_seq_cst);
@@ -290,6 +294,236 @@ test_loop_fini_waits(const MunitParameter p[], void *d)
 	                     memory_order_seq_cst),
 	    ==, 1);
 	return MUNIT_OK;
+}
+
+/* ---- the same in a forked child ----
+ * A thread forks while a proc is parked in xtc_blocking_run.  The child
+ * has none of the pool's threads.  A child that finalizes the inherited
+ * loop must not wait for the parent's item (2.1.3 through 2.1.7 waited
+ * forever), not even after an offload of its own (/fork_own), and that
+ * offload must run (the child used to queue it behind the parent's idle
+ * count with no thread to take it).
+ *
+ * The pool is pinned, and each fork waits until every pool thread has
+ * run fn, so no thread of the parent is still starting at the fork.
+ * Under ASan a fork that lands in a new thread's set-up can copy the
+ * sanitizer's allocator lock held, and every thread the child starts
+ * then hangs on it.
+ *
+ * POSIX only.  A test whose child starts a pool thread also skips under
+ * TSan: its runtime does not start a thread in the child of a
+ * multi-threaded fork ("starting new threads after multi-threaded fork
+ * is not supported"), and the child dies. */
+#if !defined(_WIN32)
+#define FORK_TEST 1
+#if !defined(__SANITIZE_THREAD__)
+#define CHILD_THREAD_TEST 1
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#undef CHILD_THREAD_TEST
+#endif
+#endif
+#endif
+#endif
+
+#if defined(FORK_TEST)
+static xtc_loop_t *g_fork_loop;
+static _Atomic int g_fork_st;
+static int g_fork_own; /* the child offloads before its fini */
+static int g_meet_n;
+static _Atomic int g_meet_in, g_meet_ok;
+
+/* Wait (up to 2 s) until g_meet_n calls are in here at once, so each
+ * of g_meet_n pool threads has run one. */
+static int
+meet_fn(void *arg)
+{
+	int k;
+
+	(void)arg;
+	atomic_fetch_add_explicit(&g_meet_in, 1, memory_order_seq_cst);
+	for (k = 0; k < 2000 && atomic_load_explicit(&g_meet_in,
+	    memory_order_seq_cst) < g_meet_n; k++)
+		(void)usleep(1000);
+	return 7;
+}
+
+static void
+meet_runner(void *arg)
+{
+	int out = -1;
+
+	(void)arg;
+	if (xtc_blocking_run(meet_fn, NULL, &out) == XTC_OK && out == 7)
+		atomic_fetch_add_explicit(&g_meet_ok, 1, memory_order_seq_cst);
+}
+
+/* n procs on a fresh loop each run one xtc_blocking_run, all at once;
+ * 0 if all n returned 7 with n calls in fn together. */
+static int
+offload_meet(int n)
+{
+	xtc_loop_t *l = NULL;
+	int i;
+
+	g_meet_n = n;
+	atomic_store_explicit(&g_meet_in, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_meet_ok, 0, memory_order_seq_cst);
+	if (xtc_loop_init(&l) != XTC_OK)
+		return -1;
+	for (i = 0; i < n; i++)
+		if (xtc_proc_spawn(l, meet_runner, NULL, NULL, NULL) != XTC_OK)
+			return -1;
+	if (xtc_loop_run(l) != XTC_OK || xtc_loop_fini(l) != XTC_OK)
+		return -1;
+	return atomic_load_explicit(&g_meet_ok, memory_order_seq_cst) == n &&
+	    atomic_load_explicit(&g_meet_in, memory_order_seq_cst) == n ?
+	    0 : -1;
+}
+
+static void *
+fini_forker(void *arg)
+{
+	int st = 0;
+	pid_t pid;
+
+	(void)arg;
+	while (!atomic_load_explicit(&g_fini_fn_in, memory_order_seq_cst))
+		(void)usleep(1000);
+	pid = fork();
+	if (pid == 0) {
+		alarm(5);
+		if (g_fork_own && offload_meet(1) != 0)
+			_exit(3);
+		(void)xtc_loop_fini(g_fork_loop);
+		_exit(0);
+	}
+	if (pid < 0 || waitpid(pid, &st, 0) != pid)
+		st = 0xffff;
+	atomic_store_explicit(&g_fork_st, st, memory_order_seq_cst);
+	return NULL;
+}
+#endif
+
+static MunitResult
+fork_while_parked(int own)
+{
+#if !defined(FORK_TEST)
+	(void)own;
+	return MUNIT_SKIP;
+#else
+	pthread_t th;
+	int st;
+
+#if !defined(CHILD_THREAD_TEST)
+	if (own)
+		return MUNIT_SKIP;
+#endif
+	g_fork_own = own;
+	xtc_blocking_shutdown();
+	munit_assert_int(xtc_blocking_pool_size(1), ==, XTC_OK);
+	atomic_store_explicit(&g_fini_fn_in, 0, memory_order_seq_cst);
+	atomic_store_explicit(&g_fini_fn_done, 0, memory_order_seq_cst);
+	munit_assert_int(xtc_loop_init(&g_fork_loop), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(g_fork_loop, fini_parker, NULL, NULL,
+	    NULL), ==, XTC_OK);
+	munit_assert_int(xtc_proc_spawn(g_fork_loop, fini_stopper,
+	    g_fork_loop, NULL, NULL), ==, XTC_OK);
+	munit_assert_int(pthread_create(&th, NULL, fini_forker, NULL), ==, 0);
+	munit_assert_int(xtc_loop_run(g_fork_loop), ==, XTC_OK);
+	munit_assert_int(xtc_loop_fini(g_fork_loop), ==, XTC_OK);
+	munit_assert_int(atomic_load_explicit(&g_fini_fn_done,
+	                     memory_order_seq_cst),
+	    ==, 1);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+	st = atomic_load_explicit(&g_fork_st, memory_order_seq_cst);
+	munit_assert_true(WIFEXITED(st));
+	munit_assert_int(WEXITSTATUS(st), ==, 0);
+	return MUNIT_OK;
+#endif
+}
+
+static MunitResult
+test_loop_fini_fork(const MunitParameter p[], void *d)
+{
+	(void)p;
+	(void)d;
+	return fork_while_parked(0);
+}
+
+static MunitResult
+test_fork_own(const MunitParameter p[], void *d)
+{
+	(void)p;
+	(void)d;
+	return fork_while_parked(1);
+}
+
+/* ---- the pool in a forked child, with nothing in flight ----
+ * started: the parent's pool is up and idle; the child's offload must
+ * run (it used to sit on the queue forever: the started flag and the
+ * idle count were copied, the threads were not).  cold: the parent never
+ * started the pool.  shutdown: the child shuts the pool down, and must
+ * not join the parent's threads (it crashed in pthread_join once the
+ * parent had three or more).  The child then offloads as many calls at
+ * once as the pool has threads, and must start that many. */
+enum { FORK_STARTED, FORK_COLD, FORK_SHUTDOWN };
+#define FORK_POOL 4
+
+static MunitResult
+fork_child_run(int mode)
+{
+#if !defined(CHILD_THREAD_TEST)
+	(void)mode;
+	return MUNIT_SKIP;
+#else
+	int st = 0;
+	pid_t pid;
+
+	xtc_blocking_shutdown();
+	munit_assert_int(xtc_blocking_pool_size(FORK_POOL), ==, XTC_OK);
+	if (mode != FORK_COLD)
+		munit_assert_int(offload_meet(FORK_POOL), ==, 0);
+	pid = fork();
+	munit_assert_int(pid, >=, 0);
+	if (pid == 0) {
+		alarm(5);
+		if (mode == FORK_SHUTDOWN)
+			xtc_blocking_shutdown();
+		_exit(offload_meet(FORK_POOL) == 0 ? 0 : 3);
+	}
+	munit_assert_int(waitpid(pid, &st, 0), ==, pid);
+	munit_assert_true(WIFEXITED(st));
+	munit_assert_int(WEXITSTATUS(st), ==, 0);
+	/* The parent's pool is untouched by the child. */
+	munit_assert_int(offload_meet(FORK_POOL), ==, 0);
+	xtc_blocking_shutdown();
+	return MUNIT_OK;
+#endif
+}
+
+static MunitResult
+test_fork_run_started(const MunitParameter p[], void *d)
+{
+	(void)p;
+	(void)d;
+	return fork_child_run(FORK_STARTED);
+}
+
+static MunitResult
+test_fork_run_cold(const MunitParameter p[], void *d)
+{
+	(void)p;
+	(void)d;
+	return fork_child_run(FORK_COLD);
+}
+
+static MunitResult
+test_fork_shutdown(const MunitParameter p[], void *d)
+{
+	(void)p;
+	(void)d;
+	return fork_child_run(FORK_SHUTDOWN);
 }
 
 /* ---- clean shutdown (and restart) ---- */
@@ -639,6 +873,11 @@ static MunitTest tests[] = {
 	{ "/file_offload", test_file_offload,    NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/shutdown",   test_shutdown,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/loop_fini_waits", test_loop_fini_waits, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/loop_fini_fork", test_loop_fini_fork, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/fork_own",   test_fork_own,         NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/fork_run_started", test_fork_run_started, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/fork_run_cold", test_fork_run_cold,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/fork_shutdown", test_fork_shutdown,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = {
