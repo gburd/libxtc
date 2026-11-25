@@ -103,6 +103,7 @@ write_cases() {
 		"64;test_sim_rcu;0;0;an unrecorded retire freed a node under a reader" \
 		"92;test_sim_rcu;0;0;the epoch lost an advance" \
 		"93;test_sim_rcu;0;0;an aliased bucket freed a node a reader held" \
+		"141;test_sim_rcu;0;0;a killed reader held a grace period open" \
 		"65;test_sim_lrlock;0;0;a write was lost .* when the oplog could not grow" \
 		"67;test_sim_partition;0;0;a DOWN or link EXIT was lost under a partition" \
 		"68;test_sim_offloop_wait;0;0;a timed wait off a fiber did not return at once" \
@@ -169,6 +170,8 @@ write_cases() {
 # 64 RCU_RETIRE_FREE rcu.c frees an unrecordable retirement at once
 #               -> out of memory, a retired object is leaked, never freed
 #               under a reader
+# 141 RCU_DEAD_KEEP rcu.c keeps the slot of a fiber killed in a read side
+#               -> a fiber that can never run again holds no grace period
 # 65 LRLOCK_OPLOG_DROP lock_lr.c drops an op the oplog cannot grow to hold
 #               -> out of memory, an applied op reaches both copies
 # 67 PART_SYSDROP proc.c the sim's partition cuts DOWN and link EXIT too

@@ -104,6 +104,7 @@ void  __xtc_proc_ctx_restore __P((void *));
 void *__xtc_proc_ctx_save __P((void));
 void *xtc_proc_userdata __P((void));
 void __xtc_blocking_loop_fini __P((xtc_loop_t *));
+void __xtc_rcu_task_gone __P((xtc_task_t *));
 void __xtc_unsafe_enter __P((void));
 void __xtc_unsafe_leave __P((void));
 void xtc_alloc_audit_proc_leaks __P((xtc_pid_t, size_t *, size_t *));

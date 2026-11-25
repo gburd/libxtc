@@ -70,6 +70,49 @@ and keeps it, so later read-side sections on the fiber take no lock.
 Retired records are stamped with their epoch;
 records two epochs old are guaranteed safe to free.
 .Pp
+A fiber that can never run again holds no read side open.
+A proc that is killed
+.Pq Fn xtc_exit_pid ,
+exits
+.Pq Fn xtc_exit_self ,
+or takes a contained fault inside a read side and leaves from its
+recovery block
+.Pq Xr xtc_proc 3
+unwinds past its
+.Fn xtc_rcu_read_unlock ,
+and
+.Fn xtc_loop_fini
+.Pq Xr xtc_loop 3
+or
+.Fn xtc_exec_fini
+.Pq Xr xtc_exec 3
+frees the fibers parked on the loop; in each case the fiber's read side
+ends there, as if it had unlocked.
+A proc that recovers from a contained fault and carries on still holds
+the read side it faulted in: its recovery block must end it with
+.Fn xtc_rcu_read_unlock ,
+or exit.
+The read side of a proc that exits ends after its
+.Xr xtc_proc_at_exit 3
+callbacks have run, so a callback of a proc that exited inside a read
+side must not call
+.Fn xtc_rcu_synchronize :
+it would wait for itself forever.
+A loop that has stopped but still exists is different: it may run its
+parked fibers again, so their read sides stand, and an
+.Fn xtc_rcu_synchronize
+waits for them until the loop runs them to their unlock or is
+finalized.
+In particular, after
+.Fn xtc_app_shutdown
+or
+.Fn xtc_app_run
+.Pq Xr xtc_app 3
+returns, a proc it left parked inside a read side holds every
+synchronize off until
+.Fn xtc_app_destroy :
+stop such readers, or destroy the app, before synchronizing.
+.Pp
 Out of memory,
 .Nm xtc_rcu
 never frees an object under a reader.
@@ -99,11 +142,19 @@ place
 Memory is 2x; reclamation is immediate via the publish-drain.
 .El
 .Sh SEE ALSO
+.Xr xtc_app 3 ,
+.Xr xtc_exec 3 ,
+.Xr xtc_loop 3 ,
 .Xr xtc_lrlock 3 ,
 .Xr xtc_lwlock 3 ,
+.Xr xtc_proc 3 ,
 .Xr xtc 7
 .Sh HISTORY
 Appeared in xtc 0.1.
+Releases before 2.1.8 kept the read side of a fiber killed or exited
+inside one, or freed with its loop, open for good: every later
+.Fn xtc_rcu_synchronize
+in the process waited forever.
 Releases before 2.1.7 could free a retired object while a reader still
 held it: when two or more calls of
 .Fn xtc_rcu_synchronize

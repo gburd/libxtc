@@ -6,6 +6,34 @@ lede: >-
   Honest caveats, workarounds, and the platform-verification status.
 permalink: /reference/known-issues/
 ---
+## FIXED (2.1.8): a fiber that died inside an RCU read side held every grace period
+
+**What it was.**  A proc that was killed (`xtc_exit_pid`), exited
+(`xtc_exit_self`), or took a contained fault inside `xtc_rcu_read_lock`
+unwound past its `xtc_rcu_read_unlock`, and `xtc_loop_fini` freed the
+fibers parked on a loop without their reader slots.  Either way the
+slot stayed in its read side for good, and every later
+`xtc_rcu_synchronize` in the process waited forever; a recycled task
+struct inherited the open read side too.  A server whose clean shutdown
+killed or abandoned a connection fiber inside a read side hung in its
+store's close.  Every release with fiber reader slots is affected,
+through 2.1.7.
+
+**Fix.**  The loop ends such a fiber's read side when the fiber
+finishes (however it ends) and when its loop is finalized.  A loop
+that has stopped but still exists keeps its parked fibers' read sides,
+since it may run them again: stop those readers, or finalize the loop,
+before synchronizing.  `test/m13/test_rcu` `/dead_fiber_read_side`
+(exit, kill, fini, and recycle) hung on each route before and passes
+after; `test_sim_rcu`'s dead phase catches planted bug 141.
+
+Two cases stay as they were.  A proc that recovers from a contained
+fault and carries on still holds the read side it faulted in, until
+its recovery block calls `xtc_rcu_read_unlock` or the proc exits.  And
+the read side of a proc that exits ends after its `xtc_proc_at_exit`
+callbacks run, so a callback of a proc that exited inside a read side
+must not call `xtc_rcu_synchronize`: it waits for itself forever.
+
 ## FIXED (2.1.7): `xtc_rcu_synchronize` freed objects under readers
 
 **What it was.**  `xtc_rcu_synchronize` advanced the global epoch with a

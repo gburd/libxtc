@@ -27,6 +27,8 @@
 #include <stdint.h>
 #include <unistd.h>
 
+void __xtc_rcu_task_gone(xtc_task_t *t); /* rcu.c */
+
 /* Per-thread cursor -- see loop_int.h. */
 XTC_THREAD_LOCAL xtc_loop_t *__xtc_current_loop = NULL;
 
@@ -400,6 +402,9 @@ xtc_loop_fini(xtc_loop_t *loop)
 			if (pt != NULL)
 				__xtc_timer_park_release(pt);
 		}
+		/* A fiber parked inside an RCU read side never runs again. */
+		if (t->rcu_slot != NULL || t->rcu_noslot > 0)
+			__xtc_rcu_task_gone(t);
 		if (t->cleanup != NULL) t->cleanup(t->cleanup_arg);
 		/* Every task struct was malloc'd via __os_calloc (the free-list
 		 * only recycles between spawns; structs still on all_tasks at
@@ -1036,6 +1041,10 @@ __xtc_loop_step(xtc_loop_t *loop)
 		}
 		switch (verdict) {
 		case XTC_TASK_DONE:
+			/* A fiber killed or exited inside an RCU read side
+			 * unwound past its read_unlock. */
+			if (t->rcu_slot != NULL || t->rcu_noslot > 0)
+				__xtc_rcu_task_gone(t);
 			atomic_store_explicit(&t->state, XTC_TS_DONE,
 			    memory_order_release);
 			/* Decrement the HOME loop's alive count (where spawn

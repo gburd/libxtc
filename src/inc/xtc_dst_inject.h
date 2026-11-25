@@ -110,6 +110,9 @@
  *	 93  RCU_RECLAIM_ALIAS -- rcu.c empties a whole epoch bucket, so a
  *	                   writer that waited frees a newer retirement
  *	                   under its reader (test_sim_rcu).
+ *	141  RCU_DEAD_KEEP -- rcu.c keeps the reader slot of a fiber
+ *	                   killed inside its read side, so synchronize waits
+ *	                   for it forever (test_sim_rcu).
  *
  *	NOT plantable under DST (an honest gap, recorded so it is not
  *	mistaken for missing coverage): the xtc_amutex mutual-exclusion and
@@ -337,5 +340,13 @@
  * with the bucket (test_sim_rcu: "an aliased bucket freed a node").
  */
 #define XTC_DST_BUG_RCU_RECLAIM_ALIAS 93
+
+/*
+ * 141 RCU_DEAD_KEEP: a fiber that ends inside an RCU read side (a kill
+ * or an exit unwinds past its read_unlock) keeps its reader slot, so
+ * every later synchronize waits for a reader that can never leave
+ * (test_sim_rcu: "a killed reader held a grace period open").
+ */
+#define XTC_DST_BUG_RCU_DEAD_KEEP 141
 
 #endif /* XTC_DST_INJECT_H */

@@ -23,9 +23,11 @@
 #include "xtc_rcu.h"
 #include "xtc_exec.h"
 #include "xtc_proc.h"
+#include "xtc_loop.h"
 #include "xtc_async.h"
 #include "xtc_tail.h"
 #include "xtc_inject.h"
+#include "coro_int.h" /* __xtc_current_task (test-internal) */
 
 /* Counter incremented by the free function. */
 static _Atomic int g_freed_count;
@@ -885,6 +887,222 @@ test_publish_order(const MunitParameter p[], void *d)
 	return MUNIT_OK;
 }
 
+/*
+ * A fiber that can never run again must not hold a grace period open.
+ * Each route leaves a fiber inside a read side for good: it calls
+ * xtc_exit_self there, it is killed parked there, its loop is finalized
+ * with it parked there, or it exits there and a new fiber reuses its
+ * task struct.  A kill or an exit unwinds past read_unlock, and
+ * xtc_loop_fini freed a parked fiber without its slot, so every later
+ * xtc_rcu_synchronize in the process waited forever.  The synchronize
+ * runs on a helper thread with a 2 s deadline, so a hang is a failure
+ * rather than a stuck test.  The fini route also checks the case that
+ * is NOT released: a loop that has stopped but still exists could run
+ * the parked fiber again, so a synchronize waits for it until the loop
+ * is finalized.
+ *
+ * The recycle route checks the struct really is reused (a spawn from
+ * the loop's own thread takes it off the owner-only free list), then
+ * that the new fiber's read side is visible: a synchronize must wait
+ * while it is inside.  A struct that kept the dead fiber's nest > 0
+ * would hide the new reader from synchronize: its read_lock would not
+ * be the outermost, so it would publish no epoch (a use-after-free).
+ */
+static xtc_pid_t g_dg_victim;
+static atomic_int g_dg_in, g_dg_synced, g_dg_reading, g_dg_release;
+static xtc_task_t *g_dg_dead_task, *g_dg_new_task;
+
+static void
+dg_exit_inside(void *arg)
+{
+	(void)arg;
+	g_dg_dead_task = __xtc_current_task();
+	xtc_rcu_read_lock();
+	atomic_store(&g_dg_in, 1);
+	(void)xtc_exit_self(0);
+}
+
+static void
+dg_park_inside(void *arg)
+{
+	(void)arg;
+	xtc_rcu_read_lock();
+	atomic_store(&g_dg_in, 1);
+	for (;;)
+		(void)xtc_proc_sleep(1000LL * 1000 * 1000);
+}
+
+static void
+dg_killer(void *arg)
+{
+	(void)arg;
+	while (!atomic_load(&g_dg_in))
+		xtc_yield();
+	(void)xtc_exit_pid(g_dg_victim, 9);
+}
+
+static void
+dg_stopper(void *arg)
+{
+	while (!atomic_load(&g_dg_in))
+		xtc_yield();
+	(void)xtc_loop_stop(arg);
+}
+
+/* Inside a read side until the test releases it. */
+static void
+dg_recycled_reader(void *arg)
+{
+	(void)arg;
+	g_dg_new_task = __xtc_current_task();
+	xtc_rcu_read_lock();
+	atomic_store(&g_dg_reading, 1);
+	while (!atomic_load(&g_dg_release))
+		(void)xtc_proc_sleep(1000LL * 1000);
+	xtc_rcu_read_unlock();
+}
+
+/* On the loop: let a fiber exit inside a read side, then spawn a reader
+ * once its struct is back on the free list.  A failed spawn sets
+ * g_dg_reading to -1. */
+static void
+dg_recycle_parent(void *arg)
+{
+	int i;
+
+	if (xtc_proc_spawn(arg, dg_exit_inside, NULL, NULL, NULL) != XTC_OK) {
+		atomic_store(&g_dg_reading, -1);
+		return;
+	}
+	while (!atomic_load(&g_dg_in))
+		xtc_yield();
+	for (i = 0; i < 10; i++)
+		xtc_yield();
+	if (xtc_proc_spawn(arg, dg_recycled_reader, NULL, NULL, NULL) !=
+	    XTC_OK)
+		atomic_store(&g_dg_reading, -1);
+}
+
+static void *
+dg_loop_runner(void *arg)
+{
+	(void)xtc_loop_run(arg);
+	return NULL;
+}
+
+static void *
+dg_syncer(void *arg)
+{
+	(void)arg;
+	xtc_rcu_synchronize();
+	atomic_store(&g_dg_synced, 1);
+	return NULL;
+}
+
+/* Start a synchronize on a helper thread. */
+static pthread_t
+dg_sync_start(void)
+{
+	pthread_t th;
+
+	atomic_store(&g_dg_synced, 0);
+	munit_assert_int(pthread_create(&th, NULL, dg_syncer, NULL), ==, 0);
+	return th;
+}
+
+/* 1 (and the helper joined) if its synchronize returns within ms. */
+static int
+dg_sync_wait(pthread_t th, int64_t ms)
+{
+	int64_t deadline = xtc_clock_mono() + ms * 1000 * 1000;
+
+	while (!atomic_load(&g_dg_synced) && xtc_clock_mono() < deadline)
+		sched_yield();
+	if (!atomic_load(&g_dg_synced))
+		return 0;
+	pthread_join(th, NULL);
+	return 1;
+}
+
+static MunitResult
+dg_route(const MunitParameter p[], void *d)
+{
+	const char *route = munit_parameters_get(p, "route");
+	xtc_loop_t *l = NULL;
+	pthread_t th, lt;
+	int started = 0, hidden;
+	(void)d;
+
+	munit_assert_int(xtc_rcu_init(), ==, XTC_OK);
+	atomic_store(&g_dg_in, 0);
+	atomic_store(&g_dg_reading, 0);
+	atomic_store(&g_dg_release, 0);
+	munit_assert_int(xtc_loop_init(&l), ==, XTC_OK);
+	if (strcmp(route, "exit") == 0) {
+		munit_assert_int(xtc_proc_spawn(l, dg_exit_inside, NULL, NULL,
+		                     NULL),
+		    ==, XTC_OK);
+		munit_assert_int(xtc_loop_run(l), ==, XTC_OK);
+	} else if (strcmp(route, "recycle") == 0) {
+		munit_assert_int(xtc_proc_spawn(l, dg_recycle_parent, l, NULL,
+		                     NULL),
+		    ==, XTC_OK);
+		munit_assert_int(pthread_create(&lt, NULL, dg_loop_runner, l),
+		    ==, 0);
+		while (!atomic_load(&g_dg_reading))
+			sched_yield();
+		munit_assert_int(atomic_load(&g_dg_reading), ==, 1);
+		munit_assert_ptr_equal(g_dg_new_task, g_dg_dead_task);
+		th = dg_sync_start();
+		hidden = dg_sync_wait(th, 200);
+		atomic_store(&g_dg_release, 1);
+		munit_assert_int(pthread_join(lt, NULL), ==, 0);
+		if (hidden)
+			munit_error("route recycle: synchronize returned while "
+			            "the reader on a recycled task was inside");
+		started = 1;
+	} else if (strcmp(route, "kill") == 0) {
+		munit_assert_int(xtc_proc_spawn(l, dg_park_inside, NULL, NULL,
+		                     &g_dg_victim),
+		    ==, XTC_OK);
+		munit_assert_int(xtc_proc_spawn(l, dg_killer, NULL, NULL, NULL),
+		    ==, XTC_OK);
+		munit_assert_int(xtc_loop_run(l), ==, XTC_OK);
+	} else {
+		munit_assert_int(xtc_proc_spawn(l, dg_park_inside, NULL, NULL,
+		                     NULL),
+		    ==, XTC_OK);
+		munit_assert_int(xtc_proc_spawn(l, dg_stopper, l, NULL, NULL),
+		    ==, XTC_OK);
+		munit_assert_int(xtc_loop_run(l), ==, XTC_OK);
+		/* Halted, not finalized: the loop could run the fiber again,
+		 * so its read side stands.  The caller must end its readers
+		 * before it synchronizes. */
+		th = dg_sync_start();
+		munit_assert_false(dg_sync_wait(th, 200));
+		(void)xtc_loop_fini(l);
+		l = NULL;
+		started = 1;
+	}
+	munit_assert_true(atomic_load(&g_dg_in));
+	if (!started)
+		th = dg_sync_start();
+	if (!dg_sync_wait(th, 2000)) {
+		(void)pthread_detach(th);
+		munit_errorf("route %s: a dead fiber's read side held off "
+		             "xtc_rcu_synchronize for 2 s",
+		    route);
+	}
+	if (l != NULL)
+		(void)xtc_loop_fini(l);
+	xtc_rcu_fini();
+	return MUNIT_OK;
+}
+
+static char *dg_routes[] = { "exit", "kill", "fini", "recycle", NULL };
+static MunitParameterEnum dg_params[] = { { "route", dg_routes },
+	{ NULL, NULL } };
+
 static MunitTest tests[] = {
 	{ "/basic",          test_basic,           NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/blocks_reclaim", test_blocks_reclaim,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
@@ -904,6 +1122,8 @@ static MunitTest tests[] = {
 	    MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/publish_order", test_publish_order, NULL, NULL,
 	    MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/dead_fiber_read_side", dg_route, NULL, NULL, MUNIT_TEST_OPTION_NONE,
+	    dg_params },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = { "/m13/rcu", tests, NULL, 1, MUNIT_SUITE_OPTION_NONE };

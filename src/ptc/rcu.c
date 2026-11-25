@@ -445,6 +445,43 @@ __rcu_noslot_leave(void)
 	(void)atomic_fetch_sub_explicit(&__rcu_noslot, 1, memory_order_seq_cst);
 }
 
+/*
+ * PUBLIC: void __xtc_rcu_task_gone __P((xtc_task_t *));
+ *
+ * End whatever read side the fiber on task t still holds: it can never
+ * run again (it finished, or it was killed, exited or faulted inside a
+ * read side, which unwinds past its read_unlock), or its loop is being
+ * destroyed with it parked.  Such a fiber never dereferences again, so
+ * its slot is cleared as if it had unlocked, and its slotless count is
+ * given back: a later synchronize no longer waits for it, and a fiber
+ * that reuses the task struct starts at nest 0.  Called by the loop at
+ * XTC_TASK_DONE and by xtc_loop_fini's walk, on the thread running or
+ * finalizing the loop, never concurrently with the fiber itself.  The
+ * slot pointer is taken only if it is from the current registry
+ * generation: an older one names a slot xtc_rcu_fini freed.
+ */
+void
+__xtc_rcu_task_gone(xtc_task_t *t)
+{
+	struct rcu_tls *slot = t->rcu_slot;
+
+	if (XTC_DST_BUG(XTC_DST_BUG_RCU_DEAD_KEEP))
+		return;
+	if (slot != NULL &&
+	    t->rcu_gen ==
+	        atomic_load_explicit(&__rcu_gen, memory_order_acquire) &&
+	    slot->nest > 0) {
+		slot->nest = 0;
+		atomic_store_explicit(&slot->active_epoch, 0,
+		    memory_order_release);
+	}
+	if (t->rcu_noslot > 0) {
+		(void)atomic_fetch_sub_explicit(&__rcu_noslot, t->rcu_noslot,
+		    memory_order_seq_cst);
+		t->rcu_noslot = 0;
+	}
+}
+
 int
 xtc_rcu_init(void)
 {

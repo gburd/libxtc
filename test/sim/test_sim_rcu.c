@@ -735,6 +735,99 @@ check_cw(uint64_t seed, int alias)
 	return 0;
 }
 
+/*
+ * Dead phase: a reader fiber is killed (xtc_exit_pid) while it sleeps
+ * inside its read side, and another exits (xtc_exit_self) inside one.
+ * Neither runs its read_unlock: a kill or an exit unwinds past it.  A
+ * writer then synchronizes and must return: a fiber that can never run
+ * again holds no grace period open (plant 141, RCU_DEAD_KEEP: it keeps
+ * its slot and the writer waits forever, so the run never quiesces).
+ */
+static xtc_pid_t g_dd_victim;
+static atomic_int g_dd_in, g_dd_synced;
+
+static void
+dd_sleeper(void *arg)
+{
+	(void)arg;
+	xtc_rcu_read_lock();
+	atomic_fetch_add(&g_dd_in, 1);
+	for (;;)
+		(void)xtc_proc_sleep(1000LL * 1000 * 1000);
+}
+
+static void
+dd_exiter(void *arg)
+{
+	(void)arg;
+	xtc_rcu_read_lock();
+	atomic_fetch_add(&g_dd_in, 1);
+	(void)xtc_exit_self(0);
+}
+
+static void
+dd_killer(void *arg)
+{
+	(void)arg;
+	while (atomic_load(&g_dd_in) < 2)
+		xtc_yield();
+	(void)xtc_exit_pid(g_dd_victim, 9);
+	xtc_rcu_synchronize();
+	xtc_rcu_synchronize();
+	atomic_store(&g_dd_synced, 1);
+	rcu_fold((long)xtc_rcu_current_epoch());
+}
+
+static int
+run_dead(uint64_t seed, int *out_synced, long *out_hash, uint64_t *out_state)
+{
+	xtc_exec_t *e = NULL;
+	int rc;
+
+	atomic_store(&g_dd_in, 0);
+	atomic_store(&g_dd_synced, 0);
+	atomic_store(&g_hash, 0);
+	if (xtc_rcu_init() != XTC_OK)
+		return -1;
+	if (xtc_exec_init(&e, N_LOOPS) != XTC_OK)
+		return -1;
+	(void)xtc_proc_spawn(xtc_exec_loop(e, 0), dd_sleeper, NULL, NULL,
+	    &g_dd_victim);
+	(void)xtc_proc_spawn(xtc_exec_loop(e, 1), dd_exiter, NULL, NULL, NULL);
+	(void)xtc_proc_spawn(xtc_exec_loop(e, 2), dd_killer, NULL, NULL, NULL);
+	rc = xtc_sim_exec_run(e, seed, 200000);
+	*out_synced = atomic_load(&g_dd_synced);
+	*out_hash = atomic_load(&g_hash);
+	*out_state = xtc_sim_state_hash(e);
+	(void)xtc_exec_fini(e);
+	xtc_rcu_fini();
+	return rc;
+}
+
+static int
+check_dead(uint64_t seed)
+{
+	int sy1 = 0, sy2 = 0, rc;
+	long h1 = 0, h2 = 0;
+	uint64_t s1 = 0, s2 = 0;
+
+	rc = run_dead(seed, &sy1, &h1, &s1);
+	printf("rcu dead seed %llx: rc=%d synced=%d\n",
+	    (unsigned long long)seed, rc, sy1);
+	if (rc != XTC_OK || !sy1) {
+		printf("FAIL: dead: a killed reader held a grace period open "
+		       "(rc %d)\n",
+		    rc);
+		return 1;
+	}
+	(void)run_dead(seed, &sy2, &h2, &s2);
+	if (sy1 != sy2 || h1 != h2 || s1 != s2) {
+		printf("FAIL: dead: did not replay (hash %ld/%ld)\n", h1, h2);
+		return 1;
+	}
+	return 0;
+}
+
 static int
 run_rcu(uint64_t seed, int *out_rd, int *out_wr, int *out_uaf,
     int *out_alloc, int *out_freed, long *out_hash, uint64_t *out_state)
@@ -891,6 +984,8 @@ main(void)
 	if (check_cw(0x5C0FF, 0) != 0 || check_cw(0xB1DE7, 0) != 0 ||
 	    check_cw(0x5C0FF, 1) != 0 || check_cw(0xB1DE7, 1) != 0)
 		return 1;
+	if (check_dead(0x5C0FF) != 0 || check_dead(0xB1DE7) != 0)
+		return 1;
 
 	printf("OK: rcu under DST -- per-fiber reader slot keeps read-sides "
 	       "isolated (no reader saw a freed node), cooperative-yield "
@@ -898,7 +993,8 @@ main(void)
 	       "reclaimed, fibers that live through xtc_rcu_fini stay "
 	       "visible, nothing freed under a reader out of memory, "
 	       "concurrent writers advance the epoch once each and "
-	       "free nothing early; "
+	       "free nothing early, a reader killed inside its read side "
+	       "holds nothing open; "
 	       "replayed byte-identically and a different seed "
 	       "reorders but stays consistent\n");
 	return 0;

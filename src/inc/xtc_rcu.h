@@ -64,7 +64,10 @@ XTC_API void xtc_rcu_fini(void);
  *
  * Lock/unlock are nestable on the same thread or fiber
  * (refcount-style).  A read-side on a fiber may span a yield, a park
- * or a migration to another loop.  No system call, no lock, no atomic
+ * or a migration to another loop.  A fiber that is killed or exits
+ * inside one, or whose loop is finalized while it is parked there,
+ * ends it at that point; a parked fiber on a loop that stopped but
+ * still exists keeps it (xtc_rcu(3)).  No system call, no lock, no atomic
  * compare-exchange on the fast path (a fiber's first read-side takes a
  * lock once, to register its slot); an outermost read_lock runs one
  * full memory fence after publishing its epoch. */
