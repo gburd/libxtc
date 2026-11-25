@@ -595,10 +595,22 @@ case "$xtc_tls" in
     LIBS="$XTC_TLS_LIBS $LIBS"
     AC_MSG_CHECKING([for SSL_CTX_new with $XTC_TLS_LIBS])
     AC_LINK_IFELSE([AC_LANG_CALL([], [SSL_CTX_new])],
-      [AC_MSG_RESULT([yes])],
-      [AC_MSG_RESULT([no])
-       AC_MSG_ERROR([--with-tls=$xtc_tls: libssl not found])])
+      [AC_MSG_RESULT([yes]); ac_have_ssl_lib=yes],
+      [AC_MSG_RESULT([no]); ac_have_ssl_lib=no])
     LIBS=$ac_save_LIBS
+    # The header was on the default path but the library is not (a
+    # libdir only pkg-config knows): take pkg-config's libs.
+    AS_IF([test "x$ac_have_ssl_lib" = xno && test "x$PKG_CONFIG" != xno &&
+           $PKG_CONFIG --exists openssl 2>/dev/null],
+      [XTC_TLS_LIBS=`$PKG_CONFIG --libs openssl`
+       LIBS="$XTC_TLS_LIBS $LIBS"
+       AC_MSG_CHECKING([for SSL_CTX_new with $XTC_TLS_LIBS])
+       AC_LINK_IFELSE([AC_LANG_CALL([], [SSL_CTX_new])],
+         [AC_MSG_RESULT([yes]); ac_have_ssl_lib=yes],
+         [AC_MSG_RESULT([no])])
+       LIBS=$ac_save_LIBS])
+    AS_IF([test "x$ac_have_ssl_lib" = xno],
+      [AC_MSG_ERROR([--with-tls=$xtc_tls: libssl not found (nor through pkg-config openssl)])])
     xtc_tls_backend=openssl
     AS_IF([test "x$xtc_tls" = xlibressl],
       [xtc_tls_flavor=libressl], [xtc_tls_flavor=openssl])

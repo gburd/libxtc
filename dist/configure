@@ -5554,16 +5554,62 @@ _ACEOF
 if ac_fn_c_try_link "$LINENO"
 then :
   { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: yes" >&5
-printf "%s\n" "yes" >&6; }
+printf "%s\n" "yes" >&6; }; ac_have_ssl_lib=yes
 else case e in #(
   e) { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: no" >&5
-printf "%s\n" "no" >&6; }
-       as_fn_error $? "--with-tls=$xtc_tls: libssl not found" "$LINENO" 5 ;;
+printf "%s\n" "no" >&6; }; ac_have_ssl_lib=no ;;
 esac
 fi
 rm -f core conftest.err conftest.$ac_objext conftest.beam \
     conftest$ac_exeext conftest.$ac_ext
     LIBS=$ac_save_LIBS
+    # The header was on the default path but the library is not (a
+    # libdir only pkg-config knows): take pkg-config's libs.
+    if test "x$ac_have_ssl_lib" = xno && test "x$PKG_CONFIG" != xno &&
+           $PKG_CONFIG --exists openssl 2>/dev/null
+then :
+  XTC_TLS_LIBS=`$PKG_CONFIG --libs openssl`
+       LIBS="$XTC_TLS_LIBS $LIBS"
+       { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for SSL_CTX_new with $XTC_TLS_LIBS" >&5
+printf %s "checking for SSL_CTX_new with $XTC_TLS_LIBS... " >&6; }
+       cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+/* Override any GCC internal prototype to avoid an error.
+   Use char because int might match the return type of a GCC
+   builtin and then its argument prototype would still apply.
+   The 'extern "C"' is for builds by C++ compilers;
+   although this is not generally supported in C code supporting it here
+   has little cost and some practical benefit (sr 110532).  */
+#ifdef __cplusplus
+extern "C"
+#endif
+char SSL_CTX_new (void);
+int
+main (void)
+{
+return SSL_CTX_new ();
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"
+then :
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: yes" >&5
+printf "%s\n" "yes" >&6; }; ac_have_ssl_lib=yes
+else case e in #(
+  e) { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: no" >&5
+printf "%s\n" "no" >&6; } ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam \
+    conftest$ac_exeext conftest.$ac_ext
+       LIBS=$ac_save_LIBS
+fi
+    if test "x$ac_have_ssl_lib" = xno
+then :
+  as_fn_error $? "--with-tls=$xtc_tls: libssl not found (nor through pkg-config openssl)" "$LINENO" 5
+fi
     xtc_tls_backend=openssl
     if test "x$xtc_tls" = xlibressl
 then :
