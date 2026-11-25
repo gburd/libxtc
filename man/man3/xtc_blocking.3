@@ -172,6 +172,22 @@ stays parked there, so finalizing that loop in the child does not wait
 for it, and an inherited
 .Fn xtc_blocking_submit
 item is dropped without running.
+The pool registers its fork handlers when the library is loaded, so this
+holds for every fork, even one made before the first offload.
+On
+.Fx
+the shared library is linked with
+.Fl z Cm nodelete ,
+so
+.Xr dlclose 3
+leaves it mapped: when the program did not link libthr itself,
+.Fx
+keeps an unloaded library's fork handlers, and the next
+.Xr fork 2
+would call into unmapped code.
+On glibc and illumos,
+.Fn dlclose
+removes the handlers with the library.
 There is no fork on Windows.
 .Sh RETURN VALUES
 .Fn xtc_blocking_run
@@ -204,7 +220,9 @@ caller sees instead of unbounded backlog; back off and retry, or shed
 the request.
 .It Dv XTC_E_RESOURCE
 The pool could not be started: no pool thread could be created, or its
-fork handlers could not be registered.
+fork handlers could not be registered when the library was loaded
+.Fn ( pthread_atfork
+failed), in which case every offload of the process returns it.
 .It Dv XTC_E_NOMEM
 .Fn ( xtc_blocking_submit
 only) the work item could not be allocated.

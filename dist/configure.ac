@@ -503,6 +503,16 @@ case "$host_os" in
     xtc_shlib_style='elf'
     ;;
 esac
+# libxtc.so registers fork handlers when it is loaded (the blocking pool,
+# src/ptc/blocking.c).  FreeBSD drops a library's handlers at dlclose only
+# when libthr was loaded at startup: when libthr arrives with a dlopened
+# libxtc, the handlers outlive the unmapped text and the next fork
+# crashes.  -z nodelete keeps the library mapped, as libthr is itself.
+case "$host_os" in
+  *freebsd*)
+    xtc_shlib_ldflags="$xtc_shlib_ldflags -Wl,-z,nodelete"
+    ;;
+esac
 AC_SUBST([XTC_SHLIB_LINKNAME], [$xtc_shlib_linkname])
 AC_SUBST([XTC_SHLIB_SONAME],   [$xtc_shlib_soname])
 AC_SUBST([XTC_SHLIB_REAL],     [$xtc_shlib_real])

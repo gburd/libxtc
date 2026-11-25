@@ -483,6 +483,11 @@ if build_shared and host_sys not in ['darwin', 'windows']
   xtc_shared_link_args += '-Wl,--version-script=@0@'.format(
     meson.project_source_root() / 'dist' / 'libxtc.map')
 endif
+# FreeBSD: keep a dlopened libxtc.so mapped after dlclose, so its fork
+# handlers never outlive its text (dist/configure.ac says why).
+if build_shared and host_sys == 'freebsd'
+  xtc_shared_link_args += '-Wl,-z,nodelete'
+endif
 
 probes_sh = files('dist/xtc_probes.sh')
 probes_d = files('src/xtc_probes.d')

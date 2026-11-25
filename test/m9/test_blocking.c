@@ -526,6 +526,151 @@ test_fork_shutdown(const MunitParameter p[], void *d)
 	return fork_child_run(FORK_SHUTDOWN);
 }
 
+/* ---- a fork that races the pool's lock, before any offload ----
+ * One thread takes and drops g_lock in a loop (xtc_blocking_pool_size)
+ * in a process that has never offloaded, and the test thread forks
+ * meanwhile; each child takes g_lock itself.  When the first offload
+ * registered the fork handlers, nothing had registered them here, so a
+ * child could copy the lock held and hang.  The child handler is
+ * registered at load now, and it re-initializes the lock in every
+ * child. */
+#define FORK_RACE_N 200
+
+#if defined(FORK_TEST)
+static _Atomic int g_race_stop;
+
+static void *
+race_locker(void *arg)
+{
+	(void)arg;
+	while (!atomic_load_explicit(&g_race_stop, memory_order_relaxed))
+		(void)xtc_blocking_pool_size(FORK_POOL);
+	return NULL;
+}
+#endif
+
+static MunitResult
+test_fork_race(const MunitParameter p[], void *d)
+{
+#if !defined(FORK_TEST)
+	(void)p;
+	(void)d;
+	return MUNIT_SKIP;
+#else
+	pthread_t th;
+	int i, st = 0;
+	pid_t pid;
+
+	(void)p;
+	(void)d;
+	atomic_store_explicit(&g_race_stop, 0, memory_order_relaxed);
+	munit_assert_int(pthread_create(&th, NULL, race_locker, NULL), ==, 0);
+	for (i = 0; i < FORK_RACE_N; i++) {
+		pid = fork();
+		munit_assert_int(pid, >=, 0);
+		if (pid == 0) {
+			alarm(5);
+			(void)xtc_blocking_pool_size(FORK_POOL);
+			_exit(0);
+		}
+		if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) ||
+		    WEXITSTATUS(st) != 0)
+			break;
+	}
+	atomic_store_explicit(&g_race_stop, 1, memory_order_relaxed);
+	munit_assert_int(pthread_join(th, NULL), ==, 0);
+	if (i < FORK_RACE_N)
+		munit_errorf("fork %d of %d: child status 0x%x (14 = hung)",
+		    i + 1, FORK_RACE_N, st);
+	return MUNIT_OK;
+#endif
+}
+
+/* ---- a fork while threads wait for their offloads ----
+ * Two threads loop xtc_blocking_run_off_loop, so at a fork one of them
+ * may hold g_done_lock or wait in g_done_cv, and the pool's threads
+ * wait in g_cv or take g_done_lock to complete.  Each child offloads
+ * off the loop itself, under a 5 s alarm.  /fork_race covers g_lock
+ * only; this covers g_done_lock and the two condition variables, which
+ * a child inherits with the parent's waiters counted in them. */
+#if defined(CHILD_THREAD_TEST)
+static _Atomic int g_done_stop, g_done_up;
+
+static int
+done_fn(void *arg)
+{
+	(void)arg;
+	return 7;
+}
+
+static void *
+done_offloader(void *arg)
+{
+	int r, up = 0;
+
+	(void)arg;
+	while (!atomic_load_explicit(&g_done_stop, memory_order_relaxed)) {
+		(void)xtc_blocking_run_off_loop(done_fn, NULL, &r);
+		if (!up) {
+			up = 1;
+			atomic_fetch_add_explicit(&g_done_up, 1,
+			    memory_order_relaxed);
+		}
+	}
+	return NULL;
+}
+#endif
+
+static MunitResult
+test_fork_race_done(const MunitParameter p[], void *d)
+{
+#if !defined(CHILD_THREAD_TEST)
+	(void)p;
+	(void)d;
+	return MUNIT_SKIP;
+#else
+	pthread_t th[2];
+	int i, r, rc, st = 0;
+	pid_t pid;
+
+	(void)p;
+	(void)d;
+	xtc_blocking_shutdown();
+	munit_assert_int(xtc_blocking_pool_size(FORK_POOL), ==, XTC_OK);
+	munit_assert_int(offload_meet(FORK_POOL), ==, 0);
+	atomic_store_explicit(&g_done_stop, 0, memory_order_relaxed);
+	atomic_store_explicit(&g_done_up, 0, memory_order_relaxed);
+	munit_assert_int(pthread_create(&th[0], NULL, done_offloader, NULL), ==,
+	    0);
+	munit_assert_int(pthread_create(&th[1], NULL, done_offloader, NULL), ==,
+	    0);
+	/* Both threads are past their set-up (see the ASan note above). */
+	while (atomic_load_explicit(&g_done_up, memory_order_relaxed) < 2)
+		(void)usleep(1000);
+	for (i = 0; i < FORK_RACE_N; i++) {
+		pid = fork();
+		munit_assert_int(pid, >=, 0);
+		if (pid == 0) {
+			alarm(5);
+			r = 0;
+			rc = xtc_blocking_run_off_loop(done_fn, NULL, &r);
+			_exit(rc == XTC_OK && r == 7 ? 0 : 3);
+		}
+		if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) ||
+		    WEXITSTATUS(st) != 0)
+			break;
+	}
+	atomic_store_explicit(&g_done_stop, 1, memory_order_relaxed);
+	munit_assert_int(pthread_join(th[0], NULL), ==, 0);
+	munit_assert_int(pthread_join(th[1], NULL), ==, 0);
+	xtc_blocking_shutdown();
+	if (i < FORK_RACE_N)
+		munit_errorf("fork %d of %d: child status 0x%x (14 = hung)",
+		    i + 1, FORK_RACE_N, st);
+	return MUNIT_OK;
+#endif
+}
+
 /* ---- clean shutdown (and restart) ---- */
 static MunitResult
 test_shutdown(const MunitParameter p[], void *d)
@@ -878,6 +1023,8 @@ static MunitTest tests[] = {
 	{ "/fork_run_started", test_fork_run_started, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fork_run_cold", test_fork_run_cold,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ "/fork_shutdown", test_fork_shutdown,  NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/fork_race",  test_fork_race,        NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
+	{ "/fork_race_done", test_fork_race_done, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL },
 	{ NULL, NULL, NULL, NULL, MUNIT_TEST_OPTION_NONE, NULL }
 };
 static const MunitSuite suite = {

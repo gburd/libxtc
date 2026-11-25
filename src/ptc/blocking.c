@@ -37,18 +37,26 @@
  *
  *	fork.  Only the forking thread survives in the child, so a child
  *	has none of the pool's threads, and one of them may have held
- *	g_lock or g_done_lock at the fork.  The fork handlers (registered
- *	before the first item can be linked or queued) take both locks in
- *	prepare and release them after, and the child starts with an empty
- *	pool: nothing started, nothing queued, nothing on g_fly, and the
- *	user's thread count kept.  The child's next offload starts its own
+ *	g_lock or g_done_lock at the fork.  A child-only fork handler,
+ *	registered when the library is loaded, re-initializes both locks
+ *	and both condition variables and gives the child an empty pool:
+ *	nothing started, nothing queued, nothing on g_fly, and the user's
+ *	thread count kept.  The child's next offload starts its own
  *	threads.  The items the child drops are never run or completed
  *	there: a queued or in-flight fiber item belongs to a fiber of the
  *	parent's loops, so the child's copy of that fiber stays parked (and
  *	its loop fini no longer waits for it), and a queued
- *	xtc_blocking_submit item is leaked.  Note that a fork that races
- *	the registration itself (the first offload of the process) is not
- *	covered: the child can inherit g_lock held.
+ *	xtc_blocking_submit item is leaked.
+ *
+ *	There is deliberately no prepare handler.  One that took g_lock
+ *	would deadlock the parent inside fork(): prepare handlers run
+ *	newest first, so an allocator that registers its own after libxtc
+ *	(a preloaded scudo does) takes its lock first and then waits for
+ *	g_lock, while a thread holding g_lock waits for the allocator's
+ *	lock, because the pool allocates under g_lock (blk_start_locked,
+ *	blk_grow_locked).  Re-initializing the locks in the child needs no
+ *	lock in the parent, and the child handler calls nothing at all (see
+ *	blk_atfork_child).
  */
 
 #include "xtc_int.h"
@@ -120,30 +128,36 @@ blk_auto_size(void)
 	return n;
 }
 
+/* XTC_E_RESOURCE when the fork handlers could not be registered at load;
+ * the pool then refuses every offload.  Written only by the constructor. */
+static int g_atfork_rc = XTC_OK;
+
 #if !defined(_WIN32)
-static _Atomic int g_atfork; /* fork handlers registered; set under g_lock */
-
-/* fork prepare and parent (see the file comment).  Raw pthread calls:
- * these run inside fork(), not on a fiber.  No path holds both locks,
- * so the order is free; it is g_lock, then g_done_lock. */
-static void
-blk_atfork_prepare(void)
-{
-	(void)pthread_mutex_lock(&g_lock);
-	(void)pthread_mutex_lock(&g_done_lock);
-}
-
-static void
-blk_atfork_parent(void)
-{
-	(void)pthread_mutex_unlock(&g_done_lock);
-	(void)pthread_mutex_unlock(&g_lock);
-}
-
-/* fork child: the pool's threads are gone; forget the pool and its items. */
+/*
+ * fork child (see the file comment): the pool's threads are gone, and
+ * any of them may have held g_lock or g_done_lock at the fork; give the
+ * child fresh locks and an empty pool.
+ *
+ * NB: this handler must make no call that can allocate or take a lock
+ * that another fork handler owns.  FreeBSD runs child handlers in
+ * registration order, so this one, registered at load, runs before the
+ * child handler of anything registered later, such as a preloaded
+ * allocator whose prepare handler still holds its lock; and there
+ * pthread_cond_init allocates with the public calloc.  So the locks and
+ * condition variables are re-initialized by assigning the static
+ * initializers, which calls nothing.  On FreeBSD those are NULL, and
+ * the objects are built again on first use, outside fork().
+ */
 static void
 blk_atfork_child(void)
 {
+	static const pthread_mutex_t mtx0 = PTHREAD_MUTEX_INITIALIZER;
+	static const pthread_cond_t cv0 = PTHREAD_COND_INITIALIZER;
+
+	g_lock = mtx0;
+	g_done_lock = mtx0;
+	g_cv = cv0;
+	g_done_cv = cv0;
 	g_started = 0;
 	g_nstarted = 0;
 	g_idle = 0;
@@ -153,40 +167,23 @@ blk_atfork_child(void)
 	g_qlen = 0;
 	g_fly = NULL;
 	g_fly_waiters = 0;
-	(void)pthread_cond_init(&g_cv, NULL);
-	(void)pthread_cond_init(&g_done_cv, NULL);
-	blk_atfork_parent();
 }
-#endif
 
 /*
- * Register the fork handlers once, before the first item is linked on
- * g_fly or queued, so no fork can copy an item without the child reset.
- * XTC_OK, or XTC_E_RESOURCE if they could not be registered.
+ * Register the fork handler when the library is loaded: before main for
+ * a program linked with it, before dlopen returns for a plugin, so every
+ * later fork runs it.  Registering at first use left a window: a fork
+ * that raced it (or any lock taken before it, such as
+ * xtc_blocking_pool_size or a loop fini) could copy a lock held, and the
+ * child had nothing to reset it.
  */
-static int
-blk_atfork_init(void)
+__attribute__((constructor)) static void
+blk_atfork_register(void)
 {
-#if defined(_WIN32)
-	return XTC_OK; /* no fork */
-#else
-	int rc = XTC_OK;
-
-	if (atomic_load_explicit(&g_atfork, memory_order_acquire))
-		return XTC_OK;
-	(void)__xtc_mtx_lock(&g_lock);
-	if (!atomic_load_explicit(&g_atfork, memory_order_relaxed)) {
-		if (pthread_atfork(blk_atfork_prepare, blk_atfork_parent,
-		    blk_atfork_child) == 0)
-			atomic_store_explicit(&g_atfork, 1,
-			    memory_order_release);
-		else
-			rc = XTC_E_RESOURCE;
-	}
-	(void)__xtc_mtx_unlock(&g_lock);
-	return rc;
-#endif
+	if (pthread_atfork(NULL, NULL, blk_atfork_child) != 0)
+		g_atfork_rc = XTC_E_RESOURCE;
 }
+#endif
 
 /* Link / unlink a fiber caller's item on g_fly.  g_done_lock held. */
 static void
@@ -356,7 +353,7 @@ xtc_blocking_pool_size(int nthreads)
 static int
 blk_enqueue(struct blk_work *w)
 {
-	if (blk_atfork_init() != XTC_OK)
+	if (g_atfork_rc != XTC_OK)
 		return XTC_E_RESOURCE;
 	(void)__xtc_mtx_lock(&g_lock);
 	if (blk_start_locked() != 0) {
@@ -423,8 +420,6 @@ xtc_blocking_run(int (*fn)(void *), void *arg, int *out_result)
 	w.fiber = 1;
 	w.detached = 0;        /* synchronous: the caller owns w and waits */
 	(void)xtc_task_waker(cur, &w.waker);
-	if ((rc = blk_atfork_init()) != XTC_OK)
-		return rc;
 
 	/*
 	 * CANCELLATION: the whole window from enqueue to completion is
