@@ -7854,9 +7854,10 @@ nl_next_chunk(struct vx_stmt *st, int *done)
 		    &st->nlsrc[0]) != 0) { chunk_free(c); return NULL; }
 	}
 	while (c->nrow < c->cap) {
-		int lv = st->nl_level, sd = nl->ord[lv], r;
+		int lv = st->nl_level, sd, r;
 		int64_t rid; const uint8_t *rec; int reclen;
 		if (lv < 0) { *done = 1; break; }
+		sd = nl->ord[lv];
 		r = src_next(&st->nlsrc[lv], &rid, &rec, &reclen);
 		if (r < 0) { chunk_free(c); return NULL; }
 		if (r == 0) {                       /* level exhausted: back up */
