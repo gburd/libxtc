@@ -160,8 +160,9 @@ fi
 # without -g (e.g. CI's `CFLAGS=-Werror` jobs, which replace configure's
 # default -g -O2) therefore cannot run this gate: SKIP, do not FAIL.  The
 # probe program below is always built -g; it is the LIBRARY that matters.
+# strings, not grep -a: illumos grep has no -a and reads no binary.
 if ! (cd "$XTC_BUILD_DIR" && ar p libxtc.a proc.o 2>/dev/null | \
-      grep -qa '\.debug_info'); then
+      strings -a | grep -q '\.debug_info'); then
 	echo "  [gdb-cqes] SKIP: libxtc built without debug info (no -g)"
 	exit 0
 fi

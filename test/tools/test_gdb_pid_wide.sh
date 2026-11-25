@@ -105,8 +105,9 @@ if [ -r /proc/sys/kernel/yama/ptrace_scope ] &&
 	exit 0
 fi
 LIB="$XTC_BUILD_DIR/libxtc.a"
+# strings, not grep -a: illumos grep has no -a and reads no binary.
 if [ ! -f "$LIB" ] || ! (cd "$XTC_BUILD_DIR" && ar p libxtc.a proc.o \
-    2>/dev/null | grep -qa '\.debug_info'); then
+    2>/dev/null | strings -a | grep -q '\.debug_info'); then
 	echo "  [pid-wide] SKIP (live part): libxtc.a missing or built without -g"
 	exit 0
 fi
@@ -156,11 +157,20 @@ main(void)
 	xtc_res_set_cap(r, XTC_RES_INBOX_MSGS, 2 * N);
 	xtc_res_set_cap(r, XTC_RES_MEM_BYTES, 8LL << 30);
 	(void)xtc_tail_enable(XTC_TAIL_SCHED);
-	for (i = 0; i < N; i++)
-		if (xtc_proc_spawn(lp, parker, NULL, NULL, &pid) != XTC_OK) {
+	for (i = 0; i < N; i++) {
+		int rc = xtc_proc_spawn(lp, parker, NULL, NULL, &pid);
+
+		/* The host ran out of mappings (illumos stops near 65,500
+		 * fiber stacks), like a low vm.max_map_count: not a defect. */
+		if (rc == XTC_E_NOMEM) {
+			fprintf(stderr, "out of mappings at spawn %d\n", i);
+			return 77;
+		}
+		if (rc != XTC_OK) {
 			fprintf(stderr, "spawn %d failed\n", i);
 			return 3;
 		}
+	}
 	(void)raise(SIGSTOP);
 	return 0;
 }
@@ -190,12 +200,26 @@ i=0
 st=
 while [ "$i" -lt 300 ]; do
 	# ps, not /proc/PID/stat: FreeBSD and macOS have no procfs stat.
-	st=$(ps -o stat= -p "$PROG_PID" 2>/dev/null | cut -c1)
+	# illumos ps has no "stat" keyword; its "s" is the same letter.
+	st=$(ps -o stat= -p "$PROG_PID" 2>/dev/null ||
+	    ps -o s= -p "$PROG_PID" 2>/dev/null)
+	st=$(printf '%s' "$st" | cut -c1)
 	[ "$st" = "T" ] && break
 	[ -z "$st" ] && break
+	[ "$st" = "Z" ] && break
 	i=$((i + 1))
 	sleep 0.1
 done
+# A probe that exited 77 ran out of mappings before it stopped.
+if [ -z "$st" ] || [ "$st" = "Z" ]; then
+	prc=0
+	wait "$PROG_PID" || prc=$?
+	PROG_PID=
+	if [ "$prc" -eq 77 ]; then
+		echo "  [pid-wide] SKIP (live part): $(cat "$TMPD/prog.out")"
+		exit 0
+	fi
+fi
 if [ "$st" != "T" ]; then
 	echo "  [pid-wide] FAIL: probe never stopped: $(cat "$TMPD/prog.out")"
 	exit 1
