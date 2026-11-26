@@ -19,9 +19,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <unistd.h>
 #if defined(__linux__)
 #include <sys/eventfd.h>
-#include <unistd.h>
 #endif
 
 #ifdef XTC_ENABLE_SCHED_POLICY
@@ -1185,7 +1185,7 @@ async_cancel_wakes_immediately(void)
 /* FENCE kind (native only): submit hands the engine an eventfd; a peer signals
  * it to complete the op. Proves the FENCE await (xtc_accel_wait_fence) wires
  * end-to-end. The app owns the fd; the engine never closes it. */
-#if defined(__linux__)
+#if defined(__linux__) && defined(XTC_HAVE_ACCEL)
 static void
 fence_peer(void *arg)
 {
@@ -1227,7 +1227,7 @@ async_fence_kind(void)
 static void
 async_fence_kind(void)
 {
-	puts("batch-async: FENCE test skipped (non-Linux)");
+	puts("batch-async: FENCE test skipped (non-Linux or no accel)");
 }
 #endif
 
